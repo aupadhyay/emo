@@ -1,0 +1,20 @@
+plans/
+*.pdf
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Data artifacts
+/data/
+
+# Training runs
+runs/
+
+# uv
+uv.lock
+
+# IDE / tools
+.claude/
