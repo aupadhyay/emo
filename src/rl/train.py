@@ -21,6 +21,7 @@ import torch
 from dotenv import load_dotenv
 from tinker_cookbook import renderers, tokenizer_utils
 from tinker_cookbook.rl.data_processing import assemble_training_data, compute_advantages
+from tinker_cookbook.rl.metrics import incorporate_kl_penalty
 from tinker_cookbook.rl.rollouts import do_group_rollout
 
 from src.rl.emoji_completer import EmojiTokenCompleter
@@ -45,7 +46,7 @@ async def train(args: argparse.Namespace) -> None:
         training_client = service.create_training_client_from_state_with_optimizer(args.resume)
         logger.info("Resumed from %s", args.resume)
     elif args.sft_checkpoint:
-        training_client = service.create_lora_training_client(
+        training_client = await service.create_lora_training_client_async(
             base_model=args.sender_model,
             rank=args.lora_rank,
         )
@@ -61,6 +62,14 @@ async def train(args: argparse.Namespace) -> None:
     sender_sampling_client = training_client.save_weights_and_get_sampling_client(
         name="rl-sender-init"
     )
+
+    # Frozen reference sampling client for KL penalty (stays at SFT weights)
+    ref_sampling_client: tinker.SamplingClient | None = None
+    if args.kl_coef > 0:
+        ref_sampling_client = training_client.save_weights_and_get_sampling_client(
+            name="rl-ref-sft"
+        )
+        logger.info("KL penalty enabled: coef=%.4f", args.kl_coef)
 
     # Judge model (frozen, separate sampling client)
     judge = JudgeClient.create(service, judge_model=args.judge_model)
@@ -143,6 +152,20 @@ async def train(args: argparse.Namespace) -> None:
         if not training_data:
             logger.warning("No training data produced this iteration, skipping update")
             continue
+
+        # ── KL penalty (before stripping mask) ──
+        kl_metrics = {}
+        if ref_sampling_client is not None and args.kl_coef > 0:
+            try:
+                kl_metrics = await incorporate_kl_penalty(
+                    data_D=training_data,
+                    base_sampling_client=ref_sampling_client,
+                    kl_penalty_coef=args.kl_coef,
+                    kl_discount_factor=0.0,
+                )
+                logger.info("  KL penalty: kl_policy_base=%.4f", kl_metrics.get("kl_policy_base", 0))
+            except Exception as e:
+                logger.warning("  KL penalty failed: %s", e)
 
         # Fix datum format: Tinker PPO only accepts target_tokens + logprobs + advantages.
         # The cookbook produces a "mask" field that Tinker's server can't serialize.
@@ -228,6 +251,7 @@ async def train(args: argparse.Namespace) -> None:
             "success_rate": float(np.mean(all_successes)) if all_successes else 0.0,
             "turns/mean": float(np.mean(all_turns)) if all_turns else 0.0,
             "n_training_datums": len(training_data),
+            **{f"kl/{k}": v for k, v in kl_metrics.items()},
             "time_s": round(iter_elapsed, 1),
         }
 
@@ -269,7 +293,7 @@ def main():
     parser.add_argument("--learning-rate", type=float, default=5e-6)
     parser.add_argument("--lora-rank", type=int, default=32)
     parser.add_argument("--temperature", type=float, default=0.8)
-    # PPO clip thresholds are server defaults (0.8, 1.2)
+    parser.add_argument("--kl-coef", type=float, default=0.01, help="KL penalty coefficient (0 to disable)")
     parser.add_argument("--num-iterations", type=int, default=75)
     parser.add_argument("--save-every", type=int, default=10)
     parser.add_argument("--log-dir", default="runs/rl")

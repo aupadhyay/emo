@@ -87,13 +87,31 @@ def count_emoji(text: str) -> int:
     return len([c for c in text if regex.match(r"\p{Emoji}", c) and c not in "\ufe0f\ufe0e\u200d"])
 
 
+def filter_to_emoji(tokens: list[int], tokenizer, emoji_token_ids: set[int]) -> str:
+    """Filter token sequence to emoji-only tokens and decode, trimming broken Unicode."""
+    filtered = [t for t in tokens if t in emoji_token_ids]
+    if not filtered:
+        return ""
+    # Trim trailing tokens that form incomplete Unicode sequences
+    while filtered:
+        decoded = tokenizer.decode(filtered, skip_special_tokens=True)
+        if "\ufffd" not in decoded:
+            return decoded.strip()
+        filtered.pop()
+    return ""
+
+
 def generate_response(
     sampling_client: tinker.SamplingClient,
     tokenizer,
     user_message: str,
     sampling_params: tinker.SamplingParams,
+    emoji_token_ids: set[int] | None = None,
 ) -> str:
-    """Generate a single emoji response from the sender model."""
+    """Generate a single emoji response from the sender model.
+
+    If emoji_token_ids is provided, post-hoc filters output to emoji-only tokens.
+    """
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_message},
@@ -110,7 +128,12 @@ def generate_response(
         sampling_params=sampling_params,
     ).result()
 
-    return tokenizer.decode(response.sequences[0].tokens, skip_special_tokens=True).strip()
+    raw_tokens = response.sequences[0].tokens
+
+    if emoji_token_ids is not None:
+        return filter_to_emoji(raw_tokens, tokenizer, emoji_token_ids)
+
+    return tokenizer.decode(raw_tokens, skip_special_tokens=True).strip()
 
 
 def main():
@@ -127,6 +150,8 @@ def main():
                         help="Number of prompts to evaluate (default: 200)")
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--max-tokens", type=int, default=30)
+    parser.add_argument("--emoji-filter", action="store_true",
+                        help="Apply post-hoc emoji token filter (matches RL training setup)")
     parser.add_argument("--output-dir", type=str, default=None,
                         help="Output directory (default: runs/<mode>)")
     args = parser.parse_args()
@@ -156,6 +181,13 @@ def main():
         temperature=args.temperature,
     )
 
+    # --- Load emoji filter if requested ---
+    emoji_token_ids = None
+    if args.emoji_filter:
+        mask = np.load("data/emoji_mask.npy")
+        emoji_token_ids = set(np.where(mask)[0].tolist())
+        logger.info("Emoji filter enabled: %d allowed token IDs", len(emoji_token_ids))
+
     # --- Setup judge + embedder ---
     logger.info("Setting up judge model: %s", args.judge_model)
     judge = JudgeClient.create(service, judge_model=args.judge_model)
@@ -181,6 +213,7 @@ def main():
         # Generate emoji response
         emoji_response = generate_response(
             sampling_client, tokenizer, target, sampling_params,
+            emoji_token_ids=emoji_token_ids,
         )
 
         # Check format
@@ -248,6 +281,7 @@ def main():
     summary = {
         "mode": args.mode,
         "checkpoint": args.checkpoint,
+        "emoji_filter": args.emoji_filter,
         "n_examples": len(results),
         "time_s": round(elapsed, 1),
         "format": {

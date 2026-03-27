@@ -100,7 +100,7 @@ async def main(args):
     service = tinker.ServiceClient()
 
     # Load sender
-    tc = service.create_lora_training_client(base_model="Qwen/Qwen3.5-4B", rank=32)
+    tc = await service.create_lora_training_client_async(base_model="Qwen/Qwen3.5-4B", rank=32)
     tc.load_state(args.checkpoint)
     sender_sc = tc.save_weights_and_get_sampling_client(name="debug-sender")
     tokenizer = tc.get_tokenizer()
