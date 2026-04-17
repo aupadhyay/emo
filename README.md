@@ -96,10 +96,11 @@ uv run python -m src.eval_sft --checkpoint <tinker-state-name>
 
 ### RL training + evaluation
 
-Generate RL prompts, then train with GRPO starting from the SFT checkpoint:
+Generate RL prompts, filter them by emoji-communicability, then train with GRPO starting from the SFT checkpoint:
 
 ```bash
 uv run python -m src.data.generate_rl_prompts
+uv run python -m src.data.filter_rl_prompts
 uv run python -m src.rl.train \
   --sft-checkpoint <tinker-state-name> \
   --batch-size 32 \
@@ -121,6 +122,6 @@ uv run python -m src.chat --checkpoint <tinker-state-name>
 ## Models
 
 - **Sender:** Qwen3.5-4B (LoRA fine-tuned on Tinker)
-- **Judge:** Qwen3-30B-A3B-Instruct (frozen, used for RL reward signal)
+- **Judge:** Qwen3-30B-A3B-Instruct-2507 (frozen, used for RL reward signal)
 - **Embeddings:** all-MiniLM-L6-v2 (for semantic similarity rewards)
 
