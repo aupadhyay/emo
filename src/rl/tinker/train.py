@@ -20,14 +20,17 @@ import tinker
 import torch
 from dotenv import load_dotenv
 from tinker_cookbook import renderers, tokenizer_utils
-from tinker_cookbook.rl.data_processing import assemble_training_data, compute_advantages
+from tinker_cookbook.rl.data_processing import (
+    assemble_training_data,
+    compute_advantages,
+)
 from tinker_cookbook.rl.metrics import incorporate_kl_penalty
 from tinker_cookbook.rl.rollouts import do_group_rollout
 
-from src.rl.emoji_completer import EmojiTokenCompleter
-from src.rl.env import RetrievalGameDataset
-from src.rl.judge import JudgeClient
-from src.rl.reward import RetrievalGameReward
+from src.rl.tinker.emoji_completer import EmojiTokenCompleter
+from src.rl.tinker.env import RetrievalGameDataset
+from src.rl.tinker.judge import JudgeClient
+from src.rl.tinker.reward import RetrievalGameReward
 
 load_dotenv()
 
@@ -43,7 +46,9 @@ async def train(args: argparse.Namespace) -> None:
 
     # Training client (sender model with LoRA)
     if args.resume:
-        training_client = service.create_training_client_from_state_with_optimizer(args.resume)
+        training_client = service.create_training_client_from_state_with_optimizer(
+            args.resume
+        )
         logger.info("Resumed from %s", args.resume)
     elif args.sft_checkpoint:
         training_client = await service.create_lora_training_client_async(
@@ -137,11 +142,17 @@ async def train(args: argparse.Namespace) -> None:
                 rewards = traj_group.get_total_rewards()
                 logger.info(
                     "  Group %d/%d: mean_reward=%.3f",
-                    group_idx, len(env_group_builders), np.mean(rewards),
+                    group_idx,
+                    len(env_group_builders),
+                    np.mean(rewards),
                 )
 
         if n_failed:
-            logger.warning("  %d/%d groups failed this iteration", n_failed, len(env_group_builders))
+            logger.warning(
+                "  %d/%d groups failed this iteration",
+                n_failed,
+                len(env_group_builders),
+            )
 
         # ── Compute advantages ──
         advantages = compute_advantages(trajectory_groups)
@@ -163,7 +174,10 @@ async def train(args: argparse.Namespace) -> None:
                     kl_penalty_coef=args.kl_coef,
                     kl_discount_factor=0.0,
                 )
-                logger.info("  KL penalty: kl_policy_base=%.4f", kl_metrics.get("kl_policy_base", 0))
+                logger.info(
+                    "  KL penalty: kl_policy_base=%.4f",
+                    kl_metrics.get("kl_policy_base", 0),
+                )
             except Exception as e:
                 logger.warning("  KL penalty failed: %s", e)
 
@@ -189,10 +203,12 @@ async def train(args: argparse.Namespace) -> None:
                     )
                 else:
                     fixed_inputs[k] = tinker.TensorData.from_torch(t.to(torch.float32))
-            fixed_data.append(tinker.Datum(
-                model_input=datum.model_input,
-                loss_fn_inputs=fixed_inputs,
-            ))
+            fixed_data.append(
+                tinker.Datum(
+                    model_input=datum.model_input,
+                    loss_fn_inputs=fixed_inputs,
+                )
+            )
         training_data = fixed_data
 
         logger.info("  Training on %d datums", len(training_data))
@@ -247,7 +263,9 @@ async def train(args: argparse.Namespace) -> None:
             "reward/std": float(np.std(all_rewards)),
             "reward/min": float(np.min(all_rewards)),
             "reward/max": float(np.max(all_rewards)),
-            "similarity/mean": float(np.mean(all_similarities)) if all_similarities else 0.0,
+            "similarity/mean": (
+                float(np.mean(all_similarities)) if all_similarities else 0.0
+            ),
             "success_rate": float(np.mean(all_successes)) if all_successes else 0.0,
             "turns/mean": float(np.mean(all_turns)) if all_turns else 0.0,
             "n_training_datums": len(training_data),
@@ -270,7 +288,9 @@ async def train(args: argparse.Namespace) -> None:
         # ── Checkpointing ──
         if (iteration + 1) % args.save_every == 0:
             ckpt_name = f"rl-step-{iteration + 1:04d}"
-            save_result = training_client.save_state(ckpt_name, ttl_seconds=604800).result()
+            save_result = training_client.save_state(
+                ckpt_name, ttl_seconds=604800
+            ).result()
             logger.info("  Checkpoint saved: %s", save_result)
 
     # Final save
@@ -281,7 +301,9 @@ async def train(args: argparse.Namespace) -> None:
 
 def main():
     parser = argparse.ArgumentParser(description="emoji-maxxing RL training (GRPO)")
-    parser.add_argument("--sft-checkpoint", type=str, help="Tinker state name for SFT checkpoint")
+    parser.add_argument(
+        "--sft-checkpoint", type=str, help="Tinker state name for SFT checkpoint"
+    )
     parser.add_argument("--resume", type=str, help="Resume from RL checkpoint")
     parser.add_argument("--sender-model", default=SENDER_MODEL)
     parser.add_argument("--judge-model", default="Qwen/Qwen3-30B-A3B-Instruct-2507")
@@ -293,7 +315,12 @@ def main():
     parser.add_argument("--learning-rate", type=float, default=5e-6)
     parser.add_argument("--lora-rank", type=int, default=32)
     parser.add_argument("--temperature", type=float, default=0.8)
-    parser.add_argument("--kl-coef", type=float, default=0.01, help="KL penalty coefficient (0 to disable)")
+    parser.add_argument(
+        "--kl-coef",
+        type=float,
+        default=0.01,
+        help="KL penalty coefficient (0 to disable)",
+    )
     parser.add_argument("--num-iterations", type=int, default=75)
     parser.add_argument("--save-every", type=int, default=10)
     parser.add_argument("--log-dir", default="runs/rl")

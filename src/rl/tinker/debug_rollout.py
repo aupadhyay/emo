@@ -11,10 +11,10 @@ import asyncio
 import tinker
 from dotenv import load_dotenv
 from tinker_cookbook import renderers, tokenizer_utils
-from src.rl.emoji_completer import EmojiTokenCompleter
+from src.rl.tinker.emoji_completer import EmojiTokenCompleter
 
-from src.rl.judge import JudgeClient
-from src.rl.reward import RetrievalGameReward
+from src.rl.tinker.judge import JudgeClient
+from src.rl.tinker.reward import RetrievalGameReward
 
 load_dotenv()
 
@@ -50,9 +50,12 @@ async def run_episode(
     similarities = []
 
     # Turn 1: initial prompt
-    messages = [
+    messages: list[renderers.Message] = [
         {"role": "system", "content": SENDER_SYSTEM_PROMPT},
-        {"role": "user", "content": f"Communicate this message using only emoji: {target}"},
+        {
+            "role": "user",
+            "content": f"Communicate this message using only emoji: {target}",
+        },
     ]
 
     for turn in range(1, max_turns + 1):
@@ -66,7 +69,9 @@ async def run_episode(
         emoji_history.append(decoded)
 
         # Judge reconstruction (pass previous guesses for multi-turn context)
-        guess = await judge.reconstruct_async(emoji_history, judge_guesses=judge_guesses)
+        guess = await judge.reconstruct_async(
+            emoji_history, judge_guesses=judge_guesses
+        )
         judge_guesses.append(guess)
 
         # Similarity
@@ -79,13 +84,15 @@ async def run_episode(
 
         # Build next prompt with history
         messages.append({"role": "assistant", "content": decoded})
-        messages.append({
-            "role": "user",
-            "content": (
-                f'The receiver understood: "{guess}"\n'
-                "Send more emoji to clarify or correct their understanding."
-            ),
-        })
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    f'The receiver understood: "{guess}"\n'
+                    "Send more emoji to clarify or correct their understanding."
+                ),
+            }
+        )
 
     return {
         "target": target,
@@ -100,7 +107,9 @@ async def main(args):
     service = tinker.ServiceClient()
 
     # Load sender
-    tc = await service.create_lora_training_client_async(base_model="Qwen/Qwen3.5-4B", rank=32)
+    tc = await service.create_lora_training_client_async(
+        base_model="Qwen/Qwen3.5-4B", rank=32
+    )
     tc.load_state(args.checkpoint)
     sender_sc = tc.save_weights_and_get_sampling_client(name="debug-sender")
     tokenizer = tc.get_tokenizer()
@@ -125,7 +134,12 @@ async def main(args):
 
     for target in TEST_MESSAGES:
         trace = await run_episode(
-            target, policy, judge, reward_fn, renderer, tokenizer,
+            target,
+            policy,
+            judge,
+            reward_fn,
+            renderer,
+            tokenizer,
             max_turns=args.max_turns,
         )
 
@@ -134,7 +148,9 @@ async def main(args):
             zip(trace["emoji_history"], trace["judge_guesses"], trace["similarities"])
         ):
             status = "✓" if sim >= 0.85 else "✗"
-            print(f"  Turn {i+1}: {emoji!r:40s} → Judge: {guess!r:50s} sim={sim:.3f} {status}")
+            print(
+                f"  Turn {i+1}: {emoji!r:40s} → Judge: {guess!r:50s} sim={sim:.3f} {status}"
+            )
 
         final_reward = reward_fn.compute(
             target_message=trace["target"],

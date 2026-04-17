@@ -55,7 +55,9 @@ def _clean_judge_output(text: str) -> str:
         text = lines[0]
     # If the output is mostly emoji (judge echoed input), return empty
     # so the caller can handle it
-    non_emoji = re.sub(r"[\s\U0001F000-\U0001FFFF\u200d\ufe0f\u2600-\u27BF\u2300-\u23FF]+", "", text)
+    non_emoji = re.sub(
+        r"[\s\U0001F000-\U0001FFFF\u200d\ufe0f\u2600-\u27BF\u2300-\u23FF]+", "", text
+    )
     if len(non_emoji) < 3 and len(text) > 0:
         return ""
     return text.strip()
@@ -87,7 +89,9 @@ class JudgeClient:
         return cls(sampling_client=sampling_client, judge_model=judge_model)
 
     def _build_messages(
-        self, emoji_history: list[str], judge_guesses: list[str] | None = None,
+        self,
+        emoji_history: list[str],
+        judge_guesses: list[str] | None = None,
     ) -> list[renderers.Message]:
         """Build the multi-turn conversation for the judge.
 
@@ -102,30 +106,36 @@ class JudgeClient:
 
         for i, emoji_seq in enumerate(emoji_history):
             if i == 0:
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        f"The sender sent this emoji message: {emoji_seq}\n\n"
-                        "What do you think the original message was?"
-                    ),
-                })
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"The sender sent this emoji message: {emoji_seq}\n\n"
+                            "What do you think the original message was?"
+                        ),
+                    }
+                )
             else:
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        f"Your guess was WRONG. The sender sent more emoji to help you: {emoji_seq}\n\n"
-                        "Your previous guess was not close enough. Think about what else "
-                        "these emoji could mean and make a DIFFERENT guess."
-                    ),
-                })
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Your guess was WRONG. The sender sent more emoji to help you: {emoji_seq}\n\n"
+                            "Your previous guess was not close enough. Think about what else "
+                            "these emoji could mean and make a DIFFERENT guess."
+                        ),
+                    }
+                )
 
             # Add the judge's own previous guess as an assistant turn
             # (except for the last emoji, which is what we're about to generate for)
             if i < len(judge_guesses):
-                messages.append({
-                    "role": "assistant",
-                    "content": judge_guesses[i],
-                })
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": judge_guesses[i],
+                    }
+                )
 
         return messages
 
@@ -136,7 +146,7 @@ class JudgeClient:
             raw = response_msg["content"]
         else:
             raw = self.tokenizer.decode(tokens, skip_special_tokens=True)
-        cleaned = _clean_judge_output(raw)
+        cleaned = _clean_judge_output(str(raw))
         # If cleaning returned empty (judge echoed emoji or gave garbage),
         # return a placeholder that will score low in similarity
         if not cleaned:
