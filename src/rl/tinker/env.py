@@ -16,6 +16,7 @@ from tinker_cookbook import renderers, tokenizer_utils
 from tinker_cookbook.completers import StopCondition
 from tinker_cookbook.rl.types import (
     Action,
+    ActionExtra,
     Env,
     EnvGroupBuilder,
     Metrics,
@@ -25,8 +26,8 @@ from tinker_cookbook.rl.types import (
     Trajectory,
 )
 
-from src.rl.judge import JudgeClient
-from src.rl.reward import RetrievalGameReward
+from src.rl.tinker.judge import JudgeClient
+from src.rl.tinker.reward import RetrievalGameReward
 
 SENDER_SYSTEM_PROMPT = (
     "You communicate exclusively using emoji. No text, numbers, or punctuation ever. "
@@ -72,17 +73,25 @@ class RetrievalGameEnv(Env):
     async def initial_observation(self) -> tuple[Observation, StopCondition]:
         messages: list[renderers.Message] = [
             {"role": "system", "content": SENDER_SYSTEM_PROMPT},
-            {"role": "user", "content": f"Communicate this message using only emoji: {self.target_message}"},
+            {
+                "role": "user",
+                "content": f"Communicate this message using only emoji: {self.target_message}",
+            },
         ]
         prompt = self.renderer.build_generation_prompt(messages)
         stop = self.renderer.get_stop_sequences()
         return prompt, stop
 
-    async def step(self, action: Action) -> StepResult:
+    async def step(
+        self, action: Action, *, extra: ActionExtra | None = None
+    ) -> StepResult:
         self.current_turn += 1
 
         # Decode sender's emoji output
-        sender_emoji = self.tokenizer.decode(action, skip_special_tokens=True).strip()
+        decoded = self.tokenizer.decode(action, skip_special_tokens=True)
+        sender_emoji = (
+            decoded if isinstance(decoded, str) else " ".join(decoded)
+        ).strip()
         self.emoji_history.append(sender_emoji)
 
         # Check format compliance
@@ -96,7 +105,9 @@ class RetrievalGameEnv(Env):
         self.judge_guesses.append(judge_guess)
 
         # Compute current similarity
-        similarity = self.reward_fn.embedder.similarity(self.target_message, judge_guess)
+        similarity = self.reward_fn.embedder.similarity(
+            self.target_message, judge_guess
+        )
         self.similarities.append(similarity)
         success = similarity >= self.reward_fn.similarity_threshold
 
@@ -151,20 +162,25 @@ class RetrievalGameEnv(Env):
         """Build the next prompt for the sender, including conversation history."""
         messages: list[renderers.Message] = [
             {"role": "system", "content": SENDER_SYSTEM_PROMPT},
-            {"role": "user", "content": f"Communicate this message using only emoji: {self.target_message}"},
+            {
+                "role": "user",
+                "content": f"Communicate this message using only emoji: {self.target_message}",
+            },
         ]
         # Add conversation history
         for i in range(len(self.emoji_history)):
             messages.append({"role": "assistant", "content": self.emoji_history[i]})
             if i < len(self.judge_guesses):
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        f'The receiver guessed: "{self.judge_guesses[i]}"\n'
-                        f'The original message was: "{self.target_message}"\n'
-                        "Send emoji to correct what they got wrong."
-                    ),
-                })
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            f'The receiver guessed: "{self.judge_guesses[i]}"\n'
+                            f'The original message was: "{self.target_message}"\n'
+                            "Send emoji to correct what they got wrong."
+                        ),
+                    }
+                )
 
         prompt = self.renderer.build_generation_prompt(messages)
         stop = self.renderer.get_stop_sequences()
@@ -278,10 +294,17 @@ class RetrievalGameDataset(RLDataset):
 
 def _is_emoji_only(text: str) -> bool:
     """Check if text contains only emoji characters (and whitespace/joiners)."""
-    cleaned = text.replace(" ", "").replace("\u200d", "").replace("\ufe0f", "").replace("\ufe0e", "")
+    cleaned = (
+        text.replace(" ", "")
+        .replace("\u200d", "")
+        .replace("\ufe0f", "")
+        .replace("\ufe0e", "")
+    )
     if not cleaned:
         return False
     for char in cleaned:
-        if not regex.match(r"\p{Emoji}", char) and not regex.match(r"[\U0001F3FB-\U0001F3FF]", char):
+        if not regex.match(r"\p{Emoji}", char) and not regex.match(
+            r"[\U0001F3FB-\U0001F3FF]", char
+        ):
             return False
     return True

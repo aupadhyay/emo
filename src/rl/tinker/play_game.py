@@ -18,9 +18,9 @@ import tinker
 from dotenv import load_dotenv
 from tinker_cookbook import renderers, tokenizer_utils
 
-from src.rl.emoji_completer import EmojiTokenCompleter
-from src.rl.judge import JudgeClient
-from src.rl.reward import RetrievalGameReward
+from src.rl.tinker.emoji_completer import EmojiTokenCompleter
+from src.rl.tinker.judge import JudgeClient
+from src.rl.tinker.reward import RetrievalGameReward
 
 load_dotenv()
 
@@ -43,9 +43,12 @@ async def play_one(
     judge_guesses = []
     similarities = []
 
-    messages = [
+    messages: list[renderers.Message] = [
         {"role": "system", "content": SENDER_SYSTEM_PROMPT},
-        {"role": "user", "content": f"Communicate this message using only emoji: {target}"},
+        {
+            "role": "user",
+            "content": f"Communicate this message using only emoji: {target}",
+        },
     ]
 
     print(f"\n{'='*60}")
@@ -60,7 +63,9 @@ async def play_one(
         decoded = tokenizer.decode(result.tokens, skip_special_tokens=True).strip()
         emoji_history.append(decoded)
 
-        guess = await judge.reconstruct_async(emoji_history, judge_guesses=judge_guesses)
+        guess = await judge.reconstruct_async(
+            emoji_history, judge_guesses=judge_guesses
+        )
         judge_guesses.append(guess)
 
         sim = reward_fn.embedder.similarity(target, guess)
@@ -79,14 +84,16 @@ async def play_one(
             break
 
         messages.append({"role": "assistant", "content": decoded})
-        messages.append({
-            "role": "user",
-            "content": (
-                f'The receiver guessed: "{guess}"\n'
-                f'The original message was: "{target}"\n'
-                "Send emoji to correct what they got wrong."
-            ),
-        })
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    f'The receiver guessed: "{guess}"\n'
+                    f'The original message was: "{target}"\n'
+                    "Send emoji to correct what they got wrong."
+                ),
+            }
+        )
 
     final = reward_fn.compute(
         target_message=target,
@@ -111,9 +118,12 @@ async def play_human(
     guesses = []
     similarities = []
 
-    messages = [
+    messages: list[renderers.Message] = [
         {"role": "system", "content": SENDER_SYSTEM_PROMPT},
-        {"role": "user", "content": f"Communicate this message using only emoji: {target}"},
+        {
+            "role": "user",
+            "content": f"Communicate this message using only emoji: {target}",
+        },
     ]
 
     print(f"\n{'='*60}")
@@ -161,14 +171,16 @@ async def play_human(
         if turn < max_turns:
             print(f"  The sender will send more emoji to help you.")
             messages.append({"role": "assistant", "content": decoded})
-            messages.append({
-                "role": "user",
-                "content": (
-                    f'The receiver guessed: "{guess}"\n'
-                    f'The original message was: "{target}"\n'
-                    "Send emoji to correct what they got wrong."
-                ),
-            })
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f'The receiver guessed: "{guess}"\n'
+                        f'The original message was: "{target}"\n'
+                        "Send emoji to correct what they got wrong."
+                    ),
+                }
+            )
 
     print(f"\n  ✗ Out of turns!")
     print(f"  The message was: {target}")
@@ -178,14 +190,18 @@ async def play_human(
 async def main(args):
     service = tinker.ServiceClient()
 
-    tc = await service.create_lora_training_client_async(base_model="Qwen/Qwen3.5-4B", rank=32)
+    tc = await service.create_lora_training_client_async(
+        base_model="Qwen/Qwen3.5-4B", rank=32
+    )
     tc.load_state(args.checkpoint)
     sender_sc = tc.save_weights_and_get_sampling_client(name="play-sender")
     tokenizer = tc.get_tokenizer()
     renderer = renderers.get_renderer("qwen3_disable_thinking", tokenizer)
 
     policy = EmojiTokenCompleter(
-        sampling_client=sender_sc, max_tokens=20, temperature=0.7,
+        sampling_client=sender_sc,
+        max_tokens=20,
+        temperature=0.7,
     )
     reward_fn = RetrievalGameReward(similarity_threshold=args.similarity_threshold)
 
@@ -212,7 +228,9 @@ async def main(args):
 
         while True:
             target = random.choice(prompts)
-            await play_human(target, policy, reward_fn, renderer, tokenizer, args.max_turns)
+            await play_human(
+                target, policy, reward_fn, renderer, tokenizer, args.max_turns
+            )
             try:
                 again = input("\nPlay again? (y/n): ").strip().lower()
             except (EOFError, KeyboardInterrupt):
@@ -221,7 +239,9 @@ async def main(args):
                 break
     elif args.message:
         judge = JudgeClient.create(service, judge_model=args.judge_model)
-        await play_one(args.message, policy, judge, reward_fn, renderer, tokenizer, args.max_turns)
+        await play_one(
+            args.message, policy, judge, reward_fn, renderer, tokenizer, args.max_turns
+        )
     else:
         judge = JudgeClient.create(service, judge_model=args.judge_model)
         while True:
@@ -232,7 +252,9 @@ async def main(args):
             if msg.lower() in ("q", "quit", "exit"):
                 break
             if msg:
-                await play_one(msg, policy, judge, reward_fn, renderer, tokenizer, args.max_turns)
+                await play_one(
+                    msg, policy, judge, reward_fn, renderer, tokenizer, args.max_turns
+                )
 
 
 if __name__ == "__main__":

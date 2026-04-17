@@ -51,6 +51,8 @@ def build_emoji_mask(
 ) -> np.ndarray:
     """Tokenize every known emoji sequence, collect all token IDs produced."""
     tokenizer = AutoTokenizer.from_pretrained(model_name)
+    assert tokenizer is not None
+
     vocab_size = tokenizer.vocab_size
 
     sequences = load_emoji_sequences(cache_path=f"{output_dir}/emoji-test.txt")
