@@ -5,6 +5,8 @@ description = "Training LLMs to communicate exclusively in emoji"
 requires-python = ">=3.13"
 dependencies = [
     "anthropic",
+    "matplotlib>=3.9",
+    "modal>=0.73",
     "numpy>=2.4.3",
     "python-dotenv>=1.2.2",
     "regex",
