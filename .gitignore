@@ -16,5 +16,8 @@ runs/
 # uv
 uv.lock
 
+# Visualization outputs
+viz_outputs/
+
 # IDE / tools
 .claude/
