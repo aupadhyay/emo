@@ -6,7 +6,6 @@ from transformers import AutoTokenizer
 
 from src.rl.custom.generate import (
     MODEL_NAME,
-    SIGNAL_EMOJI,
     build_emoji_mask,
     format_prompt,
 )
