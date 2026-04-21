@@ -653,6 +653,11 @@ def train(
 
     policy_model.train()
 
+    # Early stopping state
+    _best_es_reward = float("-inf")
+    _no_improve_count = 0
+    _should_stop = False
+
     # --- Training loop ---
     for step in range(1, n_steps + 1):
         phrase = rng.choice(phrases)
@@ -946,7 +951,37 @@ def train(
             logger.info(f"Checkpoint saved to {ckpt_path}")
             print(f"  Checkpoint saved to {ckpt_path}")
 
+            # Early stopping checks
+            # Primary: held-out (or training) reward plateau
+            _es_reward = (
+                _held_out_reward
+                if eval_phrases and _held_out_reward is not None
+                else eval_reward
+            )
+            if _es_reward > _best_es_reward + 0.02:
+                _best_es_reward = _es_reward
+                _no_improve_count = 0
+            else:
+                _no_improve_count += 1
+
+            if _no_improve_count >= 3:
+                print(
+                    f"\nEarly stopping: no improvement for {_no_improve_count} consecutive "
+                    f"evals (best={_best_es_reward:.4f})"
+                )
+                _should_stop = True
+
+            # Secondary: KL budget (use mean of last 5 steps)
+            _recent_kl_window = history["mean_kl"][-5:]
+            _recent_kl = sum(_recent_kl_window) / max(1, len(_recent_kl_window))
+            if _recent_kl > 0.5:
+                print(f"\nEarly stopping: KL divergence too high (recent_kl={_recent_kl:.4f})")
+                _should_stop = True
+
             policy_model.train()
+
+        if _should_stop:
+            break
 
     # --- Capture after-training samples ---
     if max_turns == 1:
