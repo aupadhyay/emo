@@ -1,12 +1,17 @@
 """GRPO training loop for the emoji communication game."""
 
 import logging
+import os
+import random
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import wandb
+
 import torch
 import torch.nn.functional as F
-from peft import LoraConfig, get_peft_model  # type: ignore[import-not-found]
+from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer, LogitsProcessor
 
 from src.rl.custom.env import Episode, SimulatedGuesser, Turn
@@ -16,7 +21,12 @@ from src.rl.custom.generate import (
     build_emoji_mask,
     format_prompt,
 )
-from src.rl.custom.reward import SimilarityScorer, compute_group_advantages, compute_repetition_penalty
+from src.rl.custom.reward import (
+    SimilarityScorer,
+    compute_group_advantages,
+    compute_repetition_penalty,
+    compute_turn_rewards,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +72,8 @@ def setup_models(
         (policy_model, ref_model, tokenizer)
     """
     tokenizer: Any = AutoTokenizer.from_pretrained(model_name)
+    assert tokenizer is not None
+
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
@@ -96,6 +108,93 @@ def setup_models(
 
 
 # ---------------------------------------------------------------------------
+# Multi-turn sequence helpers
+# ---------------------------------------------------------------------------
+
+
+def _build_multiturn_prompt_local(
+    phrase: str,
+    history: list[Turn],
+    system_prompt: str,
+    tokenizer: Any,
+) -> str:
+    """Build chat prompt for turn > 1, consistent with format_prompt for turn 1.
+
+    Uses just `phrase` as the initial user message (matching format_prompt) so
+    that rollout context exactly matches the training sequence in build_multiturn_sequence.
+    """
+    messages: list[dict] = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": phrase},
+    ]
+    for turn in history:
+        messages.append({"role": "assistant", "content": turn.emoji_output})
+        messages.append(
+            {
+                "role": "user",
+                "content": f'The player guessed: "{turn.guess}". That\'s wrong. Send more emoji to help them guess correctly.',
+            }
+        )
+    return tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+
+def build_multiturn_sequence(
+    episode: Episode,
+    tokenizer: Any,
+    system_prompt: str,
+) -> tuple[list[int], list[int]]:
+    """Build full tokenized episode sequence and response mask for GRPO training.
+
+    Constructs the full conversation for all turns in the episode and finds
+    the token positions of each assistant turn by comparing tokenized prefixes.
+    All assistant turns get gradient; user/system tokens are masked out.
+
+    Returns (input_ids, response_mask) where response_mask[i]=1 for assistant tokens.
+    """
+    messages: list[dict] = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": episode.target_phrase},
+    ]
+    for i, turn in enumerate(episode.turns):
+        messages.append({"role": "assistant", "content": turn.emoji_output})
+        # Add feedback after all turns except the last
+        if i < len(episode.turns) - 1:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": f'The player guessed: "{turn.guess}". That\'s wrong. Send more emoji to help them guess correctly.',
+                }
+            )
+
+    full_text = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=False
+    )
+    full_ids = tokenizer.encode(full_text, add_special_tokens=False)
+    response_mask = [0] * len(full_ids)
+
+    # Find each assistant turn's token range by diffing prefix lengths.
+    # prefix (with add_generation_prompt=True) ends at the opening of the assistant
+    # turn header; end_text covers up through the closing <|im_end|> of that turn.
+    for i, msg in enumerate(messages):
+        if msg["role"] != "assistant":
+            continue
+        prefix_text = tokenizer.apply_chat_template(
+            messages[:i], tokenize=False, add_generation_prompt=True
+        )
+        prefix_ids = tokenizer.encode(prefix_text, add_special_tokens=False)
+        end_text = tokenizer.apply_chat_template(
+            messages[: i + 1], tokenize=False, add_generation_prompt=False
+        )
+        end_ids = tokenizer.encode(end_text, add_special_tokens=False)
+        for j in range(len(prefix_ids), min(len(end_ids), len(response_mask))):
+            response_mask[j] = 1
+
+    return full_ids, response_mask
+
+
+# ---------------------------------------------------------------------------
 # GRPO loss
 # ---------------------------------------------------------------------------
 
@@ -104,23 +203,19 @@ def compute_grpo_loss(
     policy_model: Any,
     ref_model: Any,
     tokenizer: Any,
-    prompt_tokens: torch.Tensor,  # (B, prompt_len)
-    response_tokens: torch.Tensor,  # (B, max_resp_len) — right-padded
+    full_ids: torch.Tensor,  # (B, L)
+    response_mask: torch.Tensor,  # (B, L) float — 1 for assistant tokens
+    attention_mask: torch.Tensor,  # (B, L) — 1 for non-padding
     advantages: torch.Tensor,  # (B,)
-    attention_mask: torch.Tensor,  # (B, prompt_len + max_resp_len)
     kl_coeff: float = 0.05,
 ) -> dict[str, Any]:
     """Compute GRPO policy-gradient loss for one group of rollouts.
 
+    Works for both single-turn and multi-turn episodes. response_mask marks ALL
+    assistant tokens across all turns in the episode as trainable targets.
+
     Returns a dict with keys: loss, pg_loss, kl_loss, mean_kl, mean_logprob.
     """
-    prompt_len = prompt_tokens.shape[1]
-    full_ids = torch.cat([prompt_tokens, response_tokens], dim=1)  # (B, L)
-
-    # Response mask: 1 for actual response tokens, 0 for prompt and padding.
-    response_mask = attention_mask.clone().float()
-    response_mask[:, :prompt_len] = 0.0
-
     # Forward through policy (with gradient)
     logits_policy = policy_model(full_ids, attention_mask=attention_mask).logits
 
@@ -185,6 +280,9 @@ def train_step(
 ) -> dict[str, Any]:
     """Execute one GRPO gradient step on a group of episodes.
 
+    Supports single-turn and multi-turn: builds the full conversation sequence
+    for each episode and masks ALL assistant turns as training targets.
+
     Returns dict of metrics: loss, pg_loss, kl_loss, mean_kl, grad_norm.
     """
     if system_prompt is None:
@@ -193,40 +291,25 @@ def train_step(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     pad_id = tokenizer.pad_token_id
 
-    prompt_ids_list: list[list[int]] = []
-    response_ids_list: list[list[int]] = []
-
-    for ep in episodes:
-        # Phase 2 is single-turn; prompt is the initial format_prompt output.
-        prompt_text = format_prompt(ep.target_phrase, tokenizer, system_prompt)
-        response_text = ep.turns[0].emoji_output
-
-        p_ids = tokenizer.encode(prompt_text, add_special_tokens=False)
-        r_ids = tokenizer.encode(response_text, add_special_tokens=False)
-        r_ids.append(tokenizer.eos_token_id)  # teach the model when to stop
-
-        prompt_ids_list.append(p_ids)
-        response_ids_list.append(r_ids)
-
-    prompt_len = max(len(p) for p in prompt_ids_list)
-    max_resp_len = max(len(r) for r in response_ids_list)
+    sequences = [
+        build_multiturn_sequence(ep, tokenizer, system_prompt) for ep in episodes
+    ]
+    max_len = max(len(s[0]) for s in sequences)
     B = len(episodes)
 
-    prompt_tensor = torch.full((B, prompt_len), pad_id, dtype=torch.long)
-    response_tensor = torch.full((B, max_resp_len), pad_id, dtype=torch.long)
-    attention_mask = torch.zeros(B, prompt_len + max_resp_len, dtype=torch.long)
+    full_ids_tensor = torch.full((B, max_len), pad_id, dtype=torch.long)
+    response_mask_tensor = torch.zeros(B, max_len, dtype=torch.float)
+    attention_mask_tensor = torch.zeros(B, max_len, dtype=torch.long)
 
-    for i, (p_ids, r_ids) in enumerate(zip(prompt_ids_list, response_ids_list)):
-        # Left-pad prompt so all prompts are right-aligned (safe for same-phrase batches)
-        p_off = prompt_len - len(p_ids)
-        prompt_tensor[i, p_off:] = torch.tensor(p_ids, dtype=torch.long)
-        response_tensor[i, : len(r_ids)] = torch.tensor(r_ids, dtype=torch.long)
-        attention_mask[i, p_off:prompt_len] = 1
-        attention_mask[i, prompt_len : prompt_len + len(r_ids)] = 1
+    for i, (input_ids, resp_mask) in enumerate(sequences):
+        L = len(input_ids)
+        full_ids_tensor[i, :L] = torch.tensor(input_ids, dtype=torch.long)
+        response_mask_tensor[i, :L] = torch.tensor(resp_mask, dtype=torch.float)
+        attention_mask_tensor[i, :L] = 1
 
-    prompt_tensor = prompt_tensor.to(device)
-    response_tensor = response_tensor.to(device)
-    attention_mask = attention_mask.to(device)
+    full_ids_tensor = full_ids_tensor.to(device)
+    response_mask_tensor = response_mask_tensor.to(device)
+    attention_mask_tensor = attention_mask_tensor.to(device)
     adv_tensor = torch.tensor(advantages, dtype=torch.float32, device=device)
 
     policy_model.train()
@@ -235,10 +318,10 @@ def train_step(
         policy_model=policy_model,
         ref_model=ref_model,
         tokenizer=tokenizer,
-        prompt_tokens=prompt_tensor,
-        response_tokens=response_tensor,
+        full_ids=full_ids_tensor,
+        response_mask=response_mask_tensor,
+        attention_mask=attention_mask_tensor,
         advantages=adv_tensor,
-        attention_mask=attention_mask,
         kl_coeff=kl_coeff,
     )
 
@@ -275,10 +358,10 @@ def generate_rollouts(
     max_tokens: int = 20,
     system_prompt: str | None = None,
 ) -> list[str]:
-    """Generate group_size emoji rollouts from the current policy.
+    """Generate group_size emoji rollouts for a single-turn prompt.
 
-    Uses HuggingFace model.generate() with an EmojiLogitsProcessor so the
-    in-memory LoRA weights are applied without vLLM.
+    Uses batched generation for efficiency. For multi-turn episodes, use
+    run_episode_hf instead.
     """
     if system_prompt is None:
         system_prompt = DEFAULT_SYSTEM_PROMPT
@@ -316,6 +399,99 @@ def generate_rollouts(
     return results
 
 
+def _generate_single_hf(
+    policy_model: Any,
+    tokenizer: Any,
+    emoji_mask: torch.Tensor,
+    prompt_text: str,
+    temperature: float = 1.0,
+    max_tokens: int = 20,
+) -> str:
+    """Generate a single emoji response from the local policy model."""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    inputs = tokenizer(prompt_text, return_tensors="pt").to(device)
+
+    policy_model.eval()
+    with torch.no_grad():
+        output_ids = policy_model.generate(
+            **inputs,
+            do_sample=True,
+            temperature=temperature,
+            max_new_tokens=max_tokens,
+            logits_processor=[EmojiLogitsProcessor(emoji_mask)],
+            pad_token_id=tokenizer.pad_token_id,
+        )
+
+    prompt_len = inputs["input_ids"].shape[1]
+    response_ids = output_ids[0, prompt_len:].tolist()
+    if tokenizer.eos_token_id in response_ids:
+        response_ids = response_ids[: response_ids.index(tokenizer.eos_token_id)]
+    return tokenizer.decode(response_ids, skip_special_tokens=True).strip()
+
+
+def run_episode_hf(
+    policy_model: Any,
+    tokenizer: Any,
+    emoji_mask: torch.Tensor,
+    guesser: SimulatedGuesser,
+    scorer: SimilarityScorer,
+    phrase: str,
+    max_turns: int = 5,
+    temperature: float = 1.0,
+    max_response_tokens: int = 20,
+    system_prompt: str | None = None,
+    exact_match_threshold: float = 0.85,
+) -> Episode:
+    """Run a single multi-turn episode using the local HF policy model.
+
+    Uses _build_multiturn_prompt_local for turn > 1, which matches the format
+    used in build_multiturn_sequence so rollout context == training context.
+    """
+    if system_prompt is None:
+        system_prompt = DEFAULT_SYSTEM_PROMPT
+
+    episode = Episode(target_phrase=phrase)
+    history: list[Turn] = []
+
+    for turn_num in range(1, max_turns + 1):
+        if turn_num == 1:
+            prompt_text = format_prompt(phrase, tokenizer, system_prompt)
+        else:
+            prompt_text = _build_multiturn_prompt_local(
+                phrase, history, system_prompt, tokenizer
+            )
+
+        emoji_output = _generate_single_hf(
+            policy_model,
+            tokenizer,
+            emoji_mask,
+            prompt_text,
+            temperature,
+            max_response_tokens,
+        )
+
+        turn_history = [(t.emoji_output, t.guess) for t in history]
+        guess = guesser.guess(
+            emoji_output,
+            previous_guesses=[t.guess for t in history] if history else None,
+            turn_history=turn_history if turn_history else None,
+        )
+        sim = scorer.score(phrase, guess)
+
+        turn = Turn(
+            turn_number=turn_num, emoji_output=emoji_output, guess=guess, similarity=sim
+        )
+        history.append(turn)
+        episode.turns.append(turn)
+
+        if sim >= exact_match_threshold:
+            episode.completed = True
+            episode.completion_turn = turn_num
+            break
+
+    return episode
+
+
 # ---------------------------------------------------------------------------
 # Main training loop
 # ---------------------------------------------------------------------------
@@ -335,18 +511,41 @@ def train(
     log_every: int = 5,
     eval_every: int = 10,
     save_dir: str = "checkpoints/",
+    n_eval_episodes: int = 20,
+    guesser_model: str = "claude-sonnet-4-20250514",
 ) -> dict[str, Any]:
     """Main GRPO training loop.
 
-    Phase 2 usage: one phrase, single-turn, 20-50 steps — prove the gradient works.
+    Phase 2 (max_turns=1): single-turn, batch generation, fast.
+    Phase 3 (max_turns>1): multi-turn episodes, phrase rotation, per-turn rewards.
 
-    Returns a history dict with training metrics and before/after sample data
-    suitable for plotting in the sanity-check script.
+    Returns history dict with training metrics and before/after episode data
+    suitable for visualization.
     """
     torch.manual_seed(seed)
+    rng = random.Random(seed)
     if phrases is None:
         phrases = ["birthday party"]
-    phrase = phrases[0]  # Phase 2: always the same phrase
+    phrase_counts: dict[str, int] = {p: 0 for p in phrases}
+
+    use_wandb = wandb is not None and bool(os.environ.get("WANDB_API_KEY"))
+    if use_wandb:
+        wandb.init(
+            project="emo",
+            name=f"phase4_{datetime.now().strftime('%Y%m%d_%H%M')}",
+            config={
+                "model_name": model_name,
+                "n_steps": n_steps,
+                "group_size": group_size,
+                "learning_rate": learning_rate,
+                "kl_coeff": kl_coeff,
+                "temperature": temperature,
+                "max_turns": max_turns,
+                "lora_rank": lora_rank,
+                "n_phrases": len(phrases),
+                "phrases": phrases,
+            },
+        )
 
     logger.info("Loading models...")
     policy_model, ref_model, tokenizer = setup_models(
@@ -362,7 +561,10 @@ def train(
     )
 
     emoji_mask = build_emoji_mask(tokenizer)
-    guesser = SimulatedGuesser(difficulty="casual", conversation_mode=False)
+    # Multi-turn training uses conversation_mode=True so the guesser sees full history.
+    guesser = SimulatedGuesser(
+        model=guesser_model, difficulty="casual", conversation_mode=max_turns > 1
+    )
     scorer = SimilarityScorer()
 
     history: dict[str, Any] = {
@@ -373,60 +575,132 @@ def train(
         "mean_rewards": [],
         "mean_kl": [],
         "grad_norms": [],
+        "group_variances": [],
+        "phrase_per_step": [],
         "eval_rewards": [],
+        "eval_completion_rates": [],
+        "eval_completion_turns": [],
         "sample_outputs": [],
         "before_samples": None,
         "after_samples": None,
+        "before_episodes": [],
+        "after_episodes": [],
+        "phrase_counts": phrase_counts,
     }
 
     # --- Capture baseline (before any training) ---
-    logger.info(f"Generating baseline rollouts for '{phrase}'...")
-    before_emojis = generate_rollouts(
-        policy_model, tokenizer, emoji_mask, phrase, group_size, temperature
-    )
-    before_inputs = [
-        {"emoji": e, "previous_guesses": [], "turn_history": []} for e in before_emojis
-    ]
-    before_guesses = guesser.guess_batch(before_inputs)
-    before_sims = scorer.score_batch([(phrase, g) for g in before_guesses])
-    history["before_samples"] = {
-        "emojis": before_emojis,
-        "guesses": before_guesses,
-        "sims": before_sims,
-    }
-    history["sample_outputs"].append((0, phrase, before_emojis))
-    print(
-        f"\n=== Baseline (step 0) — mean sim: {sum(before_sims)/len(before_sims):.4f} ==="
-    )
-    for e, g, s in zip(before_emojis, before_guesses, before_sims):
-        print(f"  {e} → '{g}' ({s:.3f})")
+    phrase = phrases[0]
+    logger.info("Generating baseline rollouts...")
+
+    if max_turns == 1:
+        before_emojis = generate_rollouts(
+            policy_model, tokenizer, emoji_mask, phrase, group_size, temperature
+        )
+        before_inputs = [
+            {"emoji": e, "previous_guesses": [], "turn_history": []}
+            for e in before_emojis
+        ]
+        before_guesses = guesser.guess_batch(before_inputs)
+        before_sims = scorer.score_batch([(phrase, g) for g in before_guesses])
+        history["before_samples"] = {
+            "emojis": before_emojis,
+            "guesses": before_guesses,
+            "sims": before_sims,
+        }
+        history["sample_outputs"].append((0, phrase, before_emojis))
+        print(
+            f"\n=== Baseline (step 0) — mean sim: {sum(before_sims)/len(before_sims):.4f} ==="
+        )
+        for e, g, s in zip(before_emojis, before_guesses, before_sims):
+            print(f"  {e} → '{g}' ({s:.3f})")
+    else:
+        logger.info("Running multi-turn baseline episodes...")
+        eps_per_phrase = max(1, n_eval_episodes // len(phrases))
+        for p in phrases:
+            for _ in range(eps_per_phrase):
+                ep = run_episode_hf(
+                    policy_model,
+                    tokenizer,
+                    emoji_mask,
+                    guesser,
+                    scorer,
+                    p,
+                    max_turns,
+                    temperature,
+                )
+                history["before_episodes"].append(ep)
+
+        before_rewards = [
+            compute_turn_rewards(
+                ep.target_phrase,
+                [t.guess for t in ep.turns],
+                scorer,
+                emoji_outputs=[t.emoji_output for t in ep.turns],
+            )["trajectory_reward"]
+            for ep in history["before_episodes"]
+        ]
+        avg_reward = sum(before_rewards) / len(before_rewards)
+        completion_rate = sum(ep.completed for ep in history["before_episodes"]) / len(
+            history["before_episodes"]
+        )
+        print(
+            f"\n=== Baseline (before training) — mean reward: {avg_reward:.4f}  "
+            f"completion: {completion_rate:.2f} ==="
+        )
 
     policy_model.train()
 
     # --- Training loop ---
     for step in range(1, n_steps + 1):
-        emoji_outputs = generate_rollouts(
-            policy_model, tokenizer, emoji_mask, phrase, group_size, temperature
-        )
+        phrase = rng.choice(phrases)
+        phrase_counts[phrase] = phrase_counts.get(phrase, 0) + 1
+        history["phrase_per_step"].append(phrase)
 
-        # Parallel guesser calls
-        g_inputs = [
-            {"emoji": e, "previous_guesses": [], "turn_history": []}
-            for e in emoji_outputs
-        ]
-        guesses = guesser.guess_batch(g_inputs)
-        sims = scorer.score_batch([(phrase, g) for g in guesses])
-        rep_penalties = [compute_repetition_penalty(e) for e in emoji_outputs]
-        trajectory_rewards = [s - p for s, p in zip(sims, rep_penalties)]
-        advantages = compute_group_advantages(trajectory_rewards)
-
-        episodes = [
-            Episode(
-                target_phrase=phrase,
-                turns=[Turn(turn_number=1, emoji_output=e, guess=g, similarity=s)],
+        if max_turns == 1:
+            emoji_outputs = generate_rollouts(
+                policy_model, tokenizer, emoji_mask, phrase, group_size, temperature
             )
-            for e, g, s in zip(emoji_outputs, guesses, sims)
-        ]
+            g_inputs = [
+                {"emoji": e, "previous_guesses": [], "turn_history": []}
+                for e in emoji_outputs
+            ]
+            guesses = guesser.guess_batch(g_inputs)
+            sims = scorer.score_batch([(phrase, g) for g in guesses])
+            rep_penalties = [compute_repetition_penalty(e) for e in emoji_outputs]
+            trajectory_rewards = [s - p for s, p in zip(sims, rep_penalties)]
+            episodes = [
+                Episode(
+                    target_phrase=phrase,
+                    turns=[Turn(turn_number=1, emoji_output=e, guess=g, similarity=s)],
+                )
+                for e, g, s in zip(emoji_outputs, guesses, sims)
+            ]
+        else:
+            episodes = []
+            for _ in range(group_size):
+                ep = run_episode_hf(
+                    policy_model,
+                    tokenizer,
+                    emoji_mask,
+                    guesser,
+                    scorer,
+                    phrase,
+                    max_turns,
+                    temperature,
+                )
+                episodes.append(ep)
+
+            trajectory_rewards = [
+                compute_turn_rewards(
+                    ep.target_phrase,
+                    [t.guess for t in ep.turns],
+                    scorer,
+                    emoji_outputs=[t.emoji_output for t in ep.turns],
+                )["trajectory_reward"]
+                for ep in episodes
+            ]
+
+        advantages = compute_group_advantages(trajectory_rewards)
 
         metrics = train_step(
             policy_model=policy_model,
@@ -439,6 +713,9 @@ def train(
         )
 
         mean_reward = sum(trajectory_rewards) / len(trajectory_rewards)
+        rewards_t = torch.tensor(trajectory_rewards, dtype=torch.float32)
+        group_variance = rewards_t.std().item() if len(trajectory_rewards) > 1 else 0.0
+
         history["steps"].append(step)
         history["losses"].append(metrics["loss"])
         history["pg_losses"].append(metrics["pg_loss"])
@@ -446,51 +723,227 @@ def train(
         history["mean_rewards"].append(mean_reward)
         history["mean_kl"].append(metrics["mean_kl"])
         history["grad_norms"].append(metrics["grad_norm"])
+        history["group_variances"].append(group_variance)
+
+        if use_wandb:
+            rewards_t = torch.tensor(trajectory_rewards, dtype=torch.float32)
+            step_log: dict[str, Any] = {
+                "train/loss": metrics["loss"],
+                "train/pg_loss": metrics["pg_loss"],
+                "train/kl_loss": metrics["kl_loss"],
+                "train/mean_reward": mean_reward,
+                "train/mean_kl": metrics["mean_kl"],
+                "train/grad_norm": metrics["grad_norm"],
+                "train/group_reward_std": (
+                    rewards_t.std().item() if len(trajectory_rewards) > 1 else 0.0
+                ),
+                "train/group_reward_min": rewards_t.min().item(),
+                "train/group_reward_max": rewards_t.max().item(),
+                "train/phrase": phrase,
+                "step": step,
+            }
+            if max_turns > 1:
+                step_log["train/completed"] = sum(
+                    ep.completed for ep in episodes
+                ) / len(episodes)
+                step_log["train/n_turns"] = sum(len(ep.turns) for ep in episodes) / len(
+                    episodes
+                )
+            wandb.log(step_log)
 
         if step % log_every == 0:
             print(
-                f"Step {step:3d}/{n_steps} | "
+                f"Step {step:3d}/{n_steps} | phrase={phrase!r:20s} | "
                 f"loss={metrics['loss']:+.4f}  pg={metrics['pg_loss']:+.4f}  "
                 f"kl={metrics['kl_loss']:.4f}  reward={mean_reward:.4f}  "
                 f"grad={metrics['grad_norm']:.4f}"
             )
 
         if step % eval_every == 0:
-            eval_emojis = generate_rollouts(
-                policy_model, tokenizer, emoji_mask, phrase, group_size, temperature
-            )
-            eval_inputs = [
-                {"emoji": e, "previous_guesses": [], "turn_history": []}
-                for e in eval_emojis
-            ]
-            eval_guesses = guesser.guess_batch(eval_inputs)
-            eval_sims = scorer.score_batch([(phrase, g) for g in eval_guesses])
-            eval_reward = sum(eval_sims) / len(eval_sims)
+            if max_turns == 1:
+                eval_emojis = generate_rollouts(
+                    policy_model, tokenizer, emoji_mask, phrase, group_size, temperature
+                )
+                eval_inputs = [
+                    {"emoji": e, "previous_guesses": [], "turn_history": []}
+                    for e in eval_emojis
+                ]
+                eval_guesses = guesser.guess_batch(eval_inputs)
+                eval_sims = scorer.score_batch([(phrase, g) for g in eval_guesses])
+                eval_reward = sum(eval_sims) / len(eval_sims)
 
-            history["eval_rewards"].append((step, eval_reward))
-            history["sample_outputs"].append((step, phrase, eval_emojis))
+                history["eval_rewards"].append((step, eval_reward))
+                history["sample_outputs"].append((step, phrase, eval_emojis))
 
-            print(f"\n=== Eval @ step {step} — mean sim: {eval_reward:.4f} ===")
-            for e, g, s in zip(eval_emojis, eval_guesses, eval_sims):
-                print(f"  {e} → '{g}' ({s:.3f})")
-            print()
+                print(f"\n=== Eval @ step {step} — mean sim: {eval_reward:.4f} ===")
+                for e, g, s in zip(eval_emojis, eval_guesses, eval_sims):
+                    print(f"  {e} → '{g}' ({s:.3f})")
+                print()
+
+                if use_wandb:
+                    wandb.log({"eval/mean_reward": eval_reward, "step": step})
+            else:
+                eval_episodes = []
+                eval_eps_per_phrase = max(1, group_size // len(phrases))
+                for p in phrases:
+                    for _ in range(eval_eps_per_phrase):
+                        ep = run_episode_hf(
+                            policy_model,
+                            tokenizer,
+                            emoji_mask,
+                            guesser,
+                            scorer,
+                            p,
+                            max_turns,
+                            temperature,
+                        )
+                        eval_episodes.append(ep)
+
+                eval_rewards_list = [
+                    compute_turn_rewards(
+                        ep.target_phrase,
+                        [t.guess for t in ep.turns],
+                        scorer,
+                    )["trajectory_reward"]
+                    for ep in eval_episodes
+                ]
+                eval_reward = sum(eval_rewards_list) / len(eval_rewards_list)
+                completion_rate = sum(ep.completed for ep in eval_episodes) / len(
+                    eval_episodes
+                )
+                completed_eps = [ep for ep in eval_episodes if ep.completed]
+                mean_completion_turn = (
+                    sum(ep.completion_turn for ep in completed_eps) / len(completed_eps)
+                    if completed_eps
+                    else float(max_turns)
+                )
+
+                history["eval_rewards"].append((step, eval_reward))
+                history["eval_completion_rates"].append((step, completion_rate))
+                history["eval_completion_turns"].append((step, mean_completion_turn))
+
+                print(
+                    f"\n=== Eval @ step {step} — reward: {eval_reward:.4f}  "
+                    f"completion: {completion_rate:.2f}  avg_turn: {mean_completion_turn:.2f} ==="
+                )
+                for ep in eval_episodes[:2]:
+                    print(f"  Phrase: '{ep.target_phrase}'")
+                    for t in ep.turns:
+                        print(
+                            f"    Turn {t.turn_number}: {t.emoji_output} → '{t.guess}' (sim: {t.similarity:.3f})"
+                        )
+                print()
+
+                if use_wandb:
+                    eval_log: dict[str, Any] = {
+                        "eval/mean_reward": eval_reward,
+                        "eval/completion_rate": completion_rate,
+                        "eval/avg_completion_turn": mean_completion_turn,
+                        "step": step,
+                    }
+
+                    # Per-phrase reward breakdown
+                    phrase_rewards: dict[str, list[float]] = {}
+                    for ep, r in zip(eval_episodes, eval_rewards_list):
+                        phrase_rewards.setdefault(ep.target_phrase, []).append(r)
+                    for p, rs in phrase_rewards.items():
+                        eval_log[f"eval/phrase_reward/{p}"] = sum(rs) / len(rs)
+
+                    # Per-turn similarity table
+                    turn_sims: dict[int, list[float]] = {}
+                    for ep in eval_episodes:
+                        for t in ep.turns:
+                            turn_sims.setdefault(t.turn_number, []).append(t.similarity)
+                    sim_table = wandb.Table(
+                        columns=["turn", "mean_sim", "std_sim", "n"],
+                        data=[
+                            [
+                                turn,
+                                sum(sims) / len(sims),
+                                (
+                                    sum((s - sum(sims) / len(sims)) ** 2 for s in sims)
+                                    / len(sims)
+                                )
+                                ** 0.5,
+                                len(sims),
+                            ]
+                            for turn, sims in sorted(turn_sims.items())
+                        ],
+                    )
+                    eval_log["eval/similarity_over_turns"] = sim_table
+
+                    # Sample transcripts (up to 5)
+                    for i, ep in enumerate(eval_episodes[:5]):
+                        lines = [f"Phrase: {ep.target_phrase}"]
+                        for t in ep.turns:
+                            lines.append(
+                                f"  Turn {t.turn_number}: {t.emoji_output} → '{t.guess}' (sim: {t.similarity:.3f})"
+                            )
+                        lines.append(f"  Completed: {ep.completed}")
+                        transcript = "\n".join(lines)
+                        eval_log[f"eval/transcript_{i}"] = wandb.Html(
+                            f"<pre>{transcript}</pre>"
+                        )
+
+                    wandb.log(eval_log)
 
             policy_model.train()
 
     # --- Capture after-training samples ---
-    after_emojis = generate_rollouts(
-        policy_model, tokenizer, emoji_mask, phrase, group_size, temperature
-    )
-    after_inputs = [
-        {"emoji": e, "previous_guesses": [], "turn_history": []} for e in after_emojis
-    ]
-    after_guesses = guesser.guess_batch(after_inputs)
-    after_sims = scorer.score_batch([(phrase, g) for g in after_guesses])
-    history["after_samples"] = {
-        "emojis": after_emojis,
-        "guesses": after_guesses,
-        "sims": after_sims,
-    }
+    if max_turns == 1:
+        phrase = phrases[0]
+        after_emojis = generate_rollouts(
+            policy_model, tokenizer, emoji_mask, phrase, group_size, temperature
+        )
+        after_inputs = [
+            {"emoji": e, "previous_guesses": [], "turn_history": []}
+            for e in after_emojis
+        ]
+        after_guesses = guesser.guess_batch(after_inputs)
+        after_sims = scorer.score_batch([(phrase, g) for g in after_guesses])
+        history["after_samples"] = {
+            "emojis": after_emojis,
+            "guesses": after_guesses,
+            "sims": after_sims,
+        }
+    else:
+        logger.info("Running post-training evaluation episodes...")
+        # Run n_eval_episodes episodes per phrase (same count as baseline for fair comparison).
+        # These serve as both the after-training comparison data (plots 3-4) and transcript
+        # source (plots 5-6); n_eval_episodes=30 covers both the 20-episode comparison and
+        # 30-transcript requirements from the Phase 3 spec.
+        eps_per_phrase = max(1, n_eval_episodes // len(phrases))
+        for p in phrases:
+            for _ in range(eps_per_phrase):
+                ep = run_episode_hf(
+                    policy_model,
+                    tokenizer,
+                    emoji_mask,
+                    guesser,
+                    scorer,
+                    p,
+                    max_turns,
+                    temperature,
+                )
+                history["after_episodes"].append(ep)
+
+        after_rewards = [
+            compute_turn_rewards(
+                ep.target_phrase,
+                [t.guess for t in ep.turns],
+                scorer,
+                emoji_outputs=[t.emoji_output for t in ep.turns],
+            )["trajectory_reward"]
+            for ep in history["after_episodes"]
+        ]
+        avg_reward = sum(after_rewards) / len(after_rewards)
+        completion_rate = sum(ep.completed for ep in history["after_episodes"]) / len(
+            history["after_episodes"]
+        )
+        print(
+            f"\n=== Post-training — mean reward: {avg_reward:.4f}  "
+            f"completion: {completion_rate:.2f} ==="
+        )
 
     # --- Save LoRA checkpoint ---
     save_path = Path(save_dir)
@@ -499,5 +952,11 @@ def train(
     tokenizer.save_pretrained(str(save_path))
     logger.info(f"Saved LoRA checkpoint to {save_path}")
     print(f"\nCheckpoint saved to {save_path}")
+
+    if use_wandb:
+        artifact = wandb.Artifact(f"emo-lora-step{n_steps}", type="model")
+        artifact.add_dir(str(save_path))
+        wandb.log_artifact(artifact)
+        wandb.finish()
 
     return history
