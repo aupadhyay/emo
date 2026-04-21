@@ -7,8 +7,9 @@ __pycache__/
 *.pyc
 .venv/
 
-# Data artifacts
-/data/
+# Data artifacts (large files excluded; small config files tracked via negation)
+/data/*
+!/data/training_phrases.json
 
 # Training runs
 runs/
