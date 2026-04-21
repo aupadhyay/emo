@@ -938,6 +938,14 @@ def train(
                         "step": step,
                     })
 
+            # Mid-run checkpoint
+            ckpt_path = Path(save_dir) / f"step_{step}"
+            ckpt_path.mkdir(parents=True, exist_ok=True)
+            policy_model.save_pretrained(str(ckpt_path))
+            tokenizer.save_pretrained(str(ckpt_path))
+            logger.info(f"Checkpoint saved to {ckpt_path}")
+            print(f"  Checkpoint saved to {ckpt_path}")
+
             policy_model.train()
 
     # --- Capture after-training samples ---
