@@ -513,6 +513,7 @@ def train(
     save_dir: str = "checkpoints/",
     n_eval_episodes: int = 20,
     guesser_model: str = "claude-sonnet-4-20250514",
+    eval_phrases: list[str] | None = None,
 ) -> dict[str, Any]:
     """Main GRPO training loop.
 
@@ -586,6 +587,8 @@ def train(
         "before_episodes": [],
         "after_episodes": [],
         "phrase_counts": phrase_counts,
+        "held_out_eval_rewards": [],
+        "held_out_completion_rates": [],
     }
 
     # --- Capture baseline (before any training) ---
@@ -886,6 +889,54 @@ def train(
                         )
 
                     wandb.log(eval_log)
+
+            # Held-out eval (phrases never trained on)
+            _held_out_reward: float | None = None
+            if eval_phrases:
+                policy_model.eval()
+                held_out_episodes = []
+                held_out_eps_per_phrase = max(1, group_size // len(eval_phrases))
+                for p in eval_phrases:
+                    for _ in range(held_out_eps_per_phrase):
+                        ep = run_episode_hf(
+                            policy_model,
+                            tokenizer,
+                            emoji_mask,
+                            guesser,
+                            scorer,
+                            p,
+                            max_turns,
+                            temperature,
+                        )
+                        held_out_episodes.append(ep)
+
+                held_out_rewards_list = [
+                    compute_turn_rewards(
+                        ep.target_phrase,
+                        [t.guess for t in ep.turns],
+                        scorer,
+                    )["trajectory_reward"]
+                    for ep in held_out_episodes
+                ]
+                _held_out_reward = sum(held_out_rewards_list) / len(held_out_rewards_list)
+                held_out_completion = sum(ep.completed for ep in held_out_episodes) / len(
+                    held_out_episodes
+                )
+
+                history["held_out_eval_rewards"].append((step, _held_out_reward))
+                history["held_out_completion_rates"].append((step, held_out_completion))
+
+                print(
+                    f"  Held-out eval: reward={_held_out_reward:.4f}  "
+                    f"completion={held_out_completion:.2f}"
+                )
+
+                if use_wandb:
+                    wandb.log({
+                        "eval/held_out_reward": _held_out_reward,
+                        "eval/held_out_completion_rate": held_out_completion,
+                        "step": step,
+                    })
 
             policy_model.train()
 
