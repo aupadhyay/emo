@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 
 import anthropic
@@ -116,8 +117,8 @@ class SimulatedGuesser:
         self.model = model
         self.system_prompt = _DIFFICULTY_PROMPTS[difficulty]
         self.conversation_mode = conversation_mode
-        self._client = anthropic.Anthropic()
-        self._async_client = anthropic.AsyncAnthropic()
+        self._client = anthropic.Anthropic(max_retries=5)
+        self._async_client = anthropic.AsyncAnthropic(max_retries=5)
 
     def _build_messages(
         self,
@@ -141,12 +142,21 @@ class SimulatedGuesser:
         turn_history: list[tuple[str, str]] | None = None,
     ) -> str:
         messages = self._build_messages(emoji_sequence, previous_guesses, turn_history)
-        response = self._client.messages.create(
-            model=self.model,
-            max_tokens=64,
-            system=self.system_prompt,
-            messages=messages,
-        )
+        for attempt in range(6):
+            try:
+                response = self._client.messages.create(
+                    model=self.model,
+                    max_tokens=64,
+                    system=self.system_prompt,
+                    messages=messages,
+                )
+                break
+            except anthropic.APIError as e:
+                if attempt == 5:
+                    raise
+                wait = 2 ** attempt
+                logger.warning("Anthropic API error (attempt %d): %s. Retrying in %ds…", attempt + 1, e, wait)
+                time.sleep(wait)
         raw = response.content[0].text
         cleaned, was_cleaned = _clean_guess(raw)
         if was_cleaned:
@@ -170,12 +180,21 @@ class SimulatedGuesser:
             previous_guesses if previous_guesses else None,
             turn_history if turn_history else None,
         )
-        response = await self._async_client.messages.create(
-            model=self.model,
-            max_tokens=64,
-            system=self.system_prompt,
-            messages=messages,
-        )
+        for attempt in range(6):
+            try:
+                response = await self._async_client.messages.create(
+                    model=self.model,
+                    max_tokens=64,
+                    system=self.system_prompt,
+                    messages=messages,
+                )
+                break
+            except anthropic.APIError as e:
+                if attempt == 5:
+                    raise
+                wait = 2 ** attempt
+                logger.warning("Anthropic API error (attempt %d): %s. Retrying in %ds…", attempt + 1, e, wait)
+                await asyncio.sleep(wait)
         raw = response.content[0].text
         cleaned, was_cleaned = _clean_guess(raw)
         if was_cleaned:

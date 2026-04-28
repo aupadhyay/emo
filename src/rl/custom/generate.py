@@ -98,8 +98,8 @@ def build_emoji_mask(tokenizer) -> torch.Tensor:
     for tid in emoji_token_ids:
         if tid == eos:
             continue
-        decoded = tokenizer.decode([tid])
-        if any(ch.isspace() for ch in decoded):
+        decoded = tokenizer.decode([tid]).strip()
+        if not decoded:  # pure whitespace token
             bad_ids.add(tid)
         elif any(ch.isascii() and (ch.isalnum() or ch in _ASCII_PUNCT) for ch in decoded):
             bad_ids.add(tid)
