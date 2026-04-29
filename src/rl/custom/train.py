@@ -440,7 +440,7 @@ def run_episode_hf(
     temperature: float = 1.0,
     max_response_tokens: int = 20,
     system_prompt: str | None = None,
-    exact_match_threshold: float = 0.85,
+    exact_match_threshold: float = 0.65,
 ) -> Episode:
     """Run a single multi-turn episode using the local HF policy model.
 
@@ -538,7 +538,7 @@ def run_episode_group_hf(
     temperature: float = 1.0,
     max_response_tokens: int = 20,
     system_prompt: str | None = None,
-    exact_match_threshold: float = 0.85,
+    exact_match_threshold: float = 0.65,
 ) -> list[Episode]:
     """Run group_size independent episodes with batched GPU + concurrent API per turn.
 
@@ -645,7 +645,7 @@ def train(
     if use_wandb:
         wandb.init(
             project="emo",
-            name=f"phase4_{datetime.now().strftime('%Y%m%d_%H%M')}",
+            name=f"grpo_{datetime.now().strftime('%Y%m%d_%H%M')}",
             config={
                 "model_name": model_name,
                 "n_steps": n_steps,
@@ -730,8 +730,12 @@ def train(
             print(f"  {e} → '{g}' ({s:.3f})")
     else:
         logger.info("Running multi-turn baseline episodes...")
-        eps_per_phrase = max(1, n_eval_episodes // len(phrases))
-        for p in phrases:
+        sampled_phrases = (
+            phrases if len(phrases) <= n_eval_episodes
+            else rng.sample(phrases, n_eval_episodes)
+        )
+        eps_per_phrase = max(1, n_eval_episodes // len(sampled_phrases))
+        for p in sampled_phrases:
             eps = run_episode_group_hf(
                 policy_model, tokenizer, emoji_mask, guesser, scorer,
                 p, eps_per_phrase, max_turns, temperature,
@@ -888,8 +892,12 @@ def train(
                     wandb.log({"eval/mean_reward": eval_reward, "step": step})
             else:
                 eval_episodes = []
-                eval_eps_per_phrase = max(1, group_size // len(phrases))
-                for p in phrases:
+                sampled_eval_phrases = (
+                    phrases if len(phrases) <= n_eval_episodes
+                    else rng.sample(phrases, n_eval_episodes)
+                )
+                eval_eps_per_phrase = max(1, group_size // len(sampled_eval_phrases))
+                for p in sampled_eval_phrases:
                     eval_episodes.extend(run_episode_group_hf(
                         policy_model, tokenizer, emoji_mask, guesser, scorer,
                         p, eval_eps_per_phrase, max_turns, temperature,

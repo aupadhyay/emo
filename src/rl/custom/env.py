@@ -230,7 +230,7 @@ def run_episode(
     target_phrase: str,
     max_turns: int = 5,
     system_prompt: str = None,
-    exact_match_threshold: float = 0.85,
+    exact_match_threshold: float = 0.65,
 ) -> Episode:
     """Run a single multi-turn episode of the emoji communication game."""
     from src.rl.custom.generate import DEFAULT_SYSTEM_PROMPT, MODEL_NAME, format_prompt

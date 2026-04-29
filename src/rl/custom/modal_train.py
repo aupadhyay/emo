@@ -101,7 +101,7 @@ def main(
     kl_coeff: float = 0.05,
     learning_rate: float = 1e-5,
 ):
-    """Launch Phase 4 training on Modal.
+    """Launch GRPO training on Modal.
 
     Usage:
         modal run src/rl/custom/modal_train.py                        # blocking

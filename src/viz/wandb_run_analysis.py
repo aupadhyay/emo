@@ -1,9 +1,9 @@
-"""Phase 4 training analysis: pull metrics from W&B and plot training curves.
+"""Training analysis: pull metrics from W&B and plot training curves.
 
 Usage:
-    uv run python -m src.viz.phase4_analysis --run-id phase4_20260427_2214
-    uv run python -m src.viz.phase4_analysis --run-id phase4_20260427_2214 --entity myteam
-    uv run python -m src.viz.phase4_analysis --run-id phase4_20260427_2214 --project emo
+    uv run python -m src.viz.wandb_run_analysis --run-id <run_name_or_id>
+    uv run python -m src.viz.wandb_run_analysis --run-id <run_id> --entity myteam
+    uv run python -m src.viz.wandb_run_analysis --run-id <run_id> --project emo
 """
 
 import argparse
@@ -14,7 +14,7 @@ import matplotlib.gridspec as gridspec
 import numpy as np
 import wandb
 
-OUT_DIR = Path("viz_outputs/phase4")
+OUT_DIR = Path("viz_outputs/runs")
 
 
 def fetch_run(entity: str | None, project: str, run_name: str):
@@ -42,11 +42,11 @@ def smooth(values: list[float], window: int = 10) -> list[float]:
     return result
 
 
-def plot_training_curves(history: dict, out_dir: Path):
+def plot_training_curves(history: dict, out_dir: Path, run_id: str, run_name: str):
     steps = history["step"]
 
     fig = plt.figure(figsize=(16, 12))
-    fig.suptitle("Phase 4 Training Curves", fontsize=14, fontweight="bold")
+    fig.suptitle(f"Training Curves — {run_name}", fontsize=14, fontweight="bold")
     gs = gridspec.GridSpec(3, 3, figure=fig, hspace=0.45, wspace=0.35)
 
     # 1. Mean reward (train)
@@ -151,7 +151,7 @@ def plot_training_curves(history: dict, out_dir: Path):
     ax.set_xlabel("Step")
     ax.legend(fontsize=8)
 
-    out_path = out_dir / "training_curves.png"
+    out_path = out_dir / f"{run_id}.png"
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved: {out_path}")
@@ -164,7 +164,7 @@ def print_summary(history: dict, run):
     comp = history.get("eval/completion_rate", [])
 
     print("\n" + "=" * 50)
-    print("PHASE 4 RUN SUMMARY")
+    print("RUN SUMMARY")
     print("=" * 50)
     print(f"  Run name:      {run.name}")
     print(f"  Run state:     {run.state}")
@@ -213,8 +213,8 @@ def fetch_history(run) -> dict:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Analyze Phase 4 W&B run")
-    parser.add_argument("--run-id", required=True, help="W&B run name or ID (e.g. phase4_20260427_2214)")
+    parser = argparse.ArgumentParser(description="Analyze a W&B training run")
+    parser.add_argument("--run-id", required=True, help="W&B run name or ID")
     parser.add_argument("--entity", default=None, help="W&B entity/username (default: uses logged-in user)")
     parser.add_argument("--project", default="emo", help="W&B project name (default: emo)")
     args = parser.parse_args()
@@ -225,7 +225,7 @@ def main():
     history = fetch_history(run)
 
     print_summary(history, run)
-    plot_training_curves(history, OUT_DIR)
+    plot_training_curves(history, OUT_DIR, args.run_id, run.name)
     print(f"\nPlots saved to {OUT_DIR}/")
 
 
