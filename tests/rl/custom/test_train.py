@@ -2,30 +2,40 @@ import json
 import pytest
 from pathlib import Path
 
+_PHRASES_PATH = Path("data/training_phrases.json")
+_skip_if_missing = pytest.mark.skipif(
+    not _PHRASES_PATH.exists(),
+    reason="data/training_phrases.json not present (untracked); generate via scripts/generate_phrases.py",
+)
+
 
 def _load():
-    with open("data/training_phrases.json") as f:
+    with open(_PHRASES_PATH) as f:
         return json.load(f)
 
 
+@_skip_if_missing
 def test_dataset_has_required_keys():
     data = _load()
     assert "training" in data
     assert "held_out" in data
 
 
+@_skip_if_missing
 def test_dataset_sizes():
     data = _load()
     assert len(data["training"]) >= 30, "Need at least 30 training phrases"
     assert len(data["held_out"]) >= 5, "Need at least 5 held-out phrases"
 
 
+@_skip_if_missing
 def test_no_overlap_between_splits():
     data = _load()
     overlap = set(data["training"]) & set(data["held_out"])
     assert not overlap, f"Phrases in both splits: {overlap}"
 
 
+@_skip_if_missing
 def test_excluded_phrases_absent():
     data = _load()
     excluded = {"pizza", "birthday party", "basketball", "cooking dinner", "feeling nostalgic"}
@@ -33,6 +43,7 @@ def test_excluded_phrases_absent():
     assert not found, f"Excluded phrases in training set: {found}"
 
 
+@_skip_if_missing
 def test_all_phrases_nonempty_strings():
     data = _load()
     for phrase in data["training"] + data["held_out"]:

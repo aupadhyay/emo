@@ -49,24 +49,29 @@ def compute_turn_rewards(
     scorer: SimilarityScorer,
     completion_bonus: float = 1.0,
     completion_decay: float = 0.2,
-    exact_match_threshold: float = 0.85,
+    exact_match_threshold: float = 0.65,
     repetition_penalty_scale: float = 0.3,
+    turn_cost: float = 0.05,
     emoji_outputs: list[str] | None = None,
 ) -> dict:
-    """Compute per-turn rewards for a multi-turn episode.
+    """Compute trajectory reward for a multi-turn episode.
 
-    If emoji_outputs is provided, a repetition penalty is subtracted from each
-    turn's reward proportional to how many emoji are repeated in that output.
+        trajectory_reward = final_similarity
+                            + completion_bonus_if_any
+                            - turn_cost * n_turns_used
+                            - sum(repetition_penalties)
 
-    Returns dict with keys: similarities, deltas, completion_turn, turn_rewards,
-    repetition_penalties, trajectory_reward.
+    `final_similarity` is taken at the completion turn if the episode completed,
+    otherwise at the last turn. Each turn carries a fixed turn_cost so taking
+    more turns has a real cost (without this, the per-turn deltas telescope and
+    the model has no incentive to be concise).
+
+    Returns dict with keys: similarities, completion_turn, n_turns_used,
+    repetition_penalties, completion_bonus, final_similarity, trajectory_reward.
+    Also returns deltas and turn_rewards for diagnostic/viz consumers.
     """
     pairs = [(target_phrase, guess) for guess in guesses]
     similarities = scorer.score_batch(pairs)
-
-    deltas = []
-    for i, sim in enumerate(similarities):
-        deltas.append(sim if i == 0 else sim - similarities[i - 1])
 
     completion_turn = None
     for i, sim in enumerate(similarities):
@@ -74,27 +79,49 @@ def compute_turn_rewards(
             completion_turn = i + 1  # 1-indexed
             break
 
+    n_turns = completion_turn if completion_turn is not None else len(guesses)
+    final_similarity = similarities[n_turns - 1] if similarities else 0.0
+
     rep_penalties = []
-    for i in range(len(guesses)):
+    for i in range(n_turns):
         emoji = (emoji_outputs[i] if emoji_outputs else None)
         penalty = compute_repetition_penalty(emoji, repetition_penalty_scale) if emoji else 0.0
         rep_penalties.append(penalty)
 
-    turn_rewards = []
-    for i, delta in enumerate(deltas):
-        reward = delta - rep_penalties[i]
-        if completion_turn is not None and (i + 1) == completion_turn:
-            bonus = completion_bonus - i * completion_decay
-            reward += max(0.0, bonus)
-        turn_rewards.append(reward)
+    bonus = 0.0
+    if completion_turn is not None:
+        bonus = max(0.0, completion_bonus - (completion_turn - 1) * completion_decay)
+
+    trajectory_reward = (
+        final_similarity
+        + bonus
+        - turn_cost * n_turns
+        - sum(rep_penalties)
+    )
+
+    # Diagnostic per-turn breakdown (kept for viz scripts; not used in training).
+    deltas = [
+        sim if i == 0 else sim - similarities[i - 1]
+        for i, sim in enumerate(similarities)
+    ]
+    turn_rewards = [
+        deltas[i] - (rep_penalties[i] if i < len(rep_penalties) else 0.0)
+        for i in range(len(similarities))
+    ]
+    if completion_turn is not None and turn_rewards:
+        turn_rewards[completion_turn - 1] += bonus
 
     return {
         "similarities": similarities,
-        "deltas": deltas,
         "completion_turn": completion_turn,
-        "turn_rewards": turn_rewards,
+        "n_turns_used": n_turns,
+        "final_similarity": final_similarity,
+        "completion_bonus": bonus,
         "repetition_penalties": rep_penalties,
-        "trajectory_reward": sum(turn_rewards),
+        "turn_cost_total": turn_cost * n_turns,
+        "trajectory_reward": trajectory_reward,
+        "deltas": deltas,
+        "turn_rewards": turn_rewards,
     }
 
 
