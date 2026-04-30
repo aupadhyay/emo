@@ -7,6 +7,9 @@ Usage:
 """
 
 import argparse
+import html
+import re
+import tempfile
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -212,11 +215,52 @@ def fetch_history(run) -> dict:
     return history
 
 
+def print_transcripts(run, last_n_evals: int = 1) -> None:
+    """Pull eval transcripts from the most recent eval step(s) and print them."""
+    df = run.history(samples=10000, pandas=True)
+    transcript_cols = sorted(c for c in df.columns if re.fullmatch(r"eval/transcript_\d+", c))
+    if not transcript_cols:
+        print("(no transcripts logged in this run)")
+        return
+
+    mask = df[transcript_cols[0]].notna()
+    eval_rows = df[mask].sort_values("_step")
+    if eval_rows.empty:
+        print("(no eval steps yet)")
+        return
+
+    rows = eval_rows.tail(last_n_evals)
+    with tempfile.TemporaryDirectory() as tmp:
+        for _, row in rows.iterrows():
+            step = int(row["_step"])
+            print(f"\n{'='*60}\nEVAL TRANSCRIPTS @ step {step}\n{'='*60}")
+            for col in transcript_cols:
+                cell = row.get(col)
+                if not isinstance(cell, dict) or "path" not in cell:
+                    continue
+                f = run.file(cell["path"])
+                local = f.download(replace=True, root=tmp)
+                content = Path(local.name).read_text()
+                m = re.search(r"<pre>(.*?)</pre>", content, re.DOTALL)
+                text = html.unescape(m.group(1)) if m else content
+                print(f"\n--- {col.split('/')[-1]} ---")
+                print(text)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Analyze a W&B training run")
     parser.add_argument("--run-id", required=True, help="W&B run name or ID")
     parser.add_argument("--entity", default=None, help="W&B entity/username (default: uses logged-in user)")
     parser.add_argument("--project", default="emo", help="W&B project name (default: emo)")
+    parser.add_argument(
+        "--show-transcripts",
+        type=int,
+        nargs="?",
+        const=1,
+        default=0,
+        metavar="N",
+        help="Print eval transcripts from the last N eval steps (default 1 if flag passed)",
+    )
     args = parser.parse_args()
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -227,6 +271,9 @@ def main():
     print_summary(history, run)
     plot_training_curves(history, OUT_DIR, args.run_id, run.name)
     print(f"\nPlots saved to {OUT_DIR}/")
+
+    if args.show_transcripts:
+        print_transcripts(run, last_n_evals=args.show_transcripts)
 
 
 if __name__ == "__main__":

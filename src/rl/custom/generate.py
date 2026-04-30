@@ -18,6 +18,21 @@ DEFAULT_SYSTEM_PROMPT = (
     "of the user's message. No text, numbers, or punctuation."
 )
 
+
+def build_system_prompt(phrase: str) -> str:
+    """Build a phrase-anchored system prompt.
+
+    Putting the target phrase in the system message keeps it salient across
+    every multi-turn rollout, even after the model's own prior outputs and the
+    guesser's wrong frame fill the user/assistant context.
+    """
+    return (
+        "You are an emoji communicator. The phrase you are trying to communicate is: "
+        f'"{phrase}". Respond using only emoji to convey this phrase. No text, '
+        "numbers, or punctuation. Do not be misled by the guesser's wrong guesses — "
+        "always communicate the original phrase."
+    )
+
 EMOJI_TEST_URL = "https://unicode.org/Public/emoji/latest/emoji-test.txt"
 
 
