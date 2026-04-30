@@ -19,6 +19,9 @@ uv.lock
 # Visualization outputs
 viz_outputs/
 
+# Eval reports
+eval_outputs/
+
 # IDE / tools
 .claude/
 

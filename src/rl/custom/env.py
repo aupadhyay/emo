@@ -56,6 +56,14 @@ def _clean_guess(raw: str) -> tuple[str, bool]:
     return cleaned, was_cleaned
 
 
+_EMPTY_PLACEHOLDER = "(no emoji sent)"
+
+
+def _safe_content(s: str) -> str:
+    """Anthropic rejects empty user messages; substitute a placeholder."""
+    return s if s and s.strip() else _EMPTY_PLACEHOLDER
+
+
 def _build_guesser_messages(
     turn_history: list[tuple[str, str]],
     current_emoji: str,
@@ -67,20 +75,20 @@ def _build_guesser_messages(
     """
     messages = []
     for emoji, guess in turn_history:
-        messages.append({"role": "user", "content": emoji})
-        messages.append({"role": "assistant", "content": guess})
+        messages.append({"role": "user", "content": _safe_content(emoji)})
+        messages.append({"role": "assistant", "content": _safe_content(guess)})
         messages.append({"role": "user", "content": f'Wrong. Here are more emoji to help you guess:'})
-    messages.append({"role": "user", "content": current_emoji})
+    messages.append({"role": "user", "content": _safe_content(current_emoji)})
     # Flatten: the "Wrong..." message and next emoji should be one user turn
     # Actually structure it properly: wrong + new emoji as a single user message
     if turn_history:
         messages = []
         for emoji, guess in turn_history:
-            messages.append({"role": "user", "content": emoji})
-            messages.append({"role": "assistant", "content": guess})
+            messages.append({"role": "user", "content": _safe_content(emoji)})
+            messages.append({"role": "assistant", "content": _safe_content(guess)})
         messages.append({
             "role": "user",
-            "content": f"Wrong. Here are more emoji to help you guess:\n{current_emoji}",
+            "content": f"Wrong. Here are more emoji to help you guess:\n{_safe_content(current_emoji)}",
         })
     return messages
 
@@ -129,7 +137,7 @@ class SimulatedGuesser:
         if self.conversation_mode and turn_history:
             return _build_guesser_messages(turn_history, emoji_sequence)
         # Stateless mode: append previous guesses as text
-        user_content = emoji_sequence
+        user_content = _safe_content(emoji_sequence)
         if previous_guesses:
             prior = ", ".join(f'"{g}"' for g in previous_guesses)
             user_content += f"\n\n(Previous wrong guesses: {prior})"
@@ -214,7 +222,7 @@ def _build_multiturn_prompt(
         messages.append({"role": "assistant", "content": turn.emoji_output})
         messages.append({
             "role": "user",
-            "content": f'The player guessed: "{turn.guess}". That\'s wrong. Send more emoji to help them guess correctly.',
+            "content": f'The player guessed: "{turn.guess}". That\'s wrong. The correct phrase is still: "{target_phrase}". Send more emoji to help them.',
         })
     return tokenizer.apply_chat_template(
         messages,
@@ -233,11 +241,11 @@ def run_episode(
     exact_match_threshold: float = 0.65,
 ) -> Episode:
     """Run a single multi-turn episode of the emoji communication game."""
-    from src.rl.custom.generate import DEFAULT_SYSTEM_PROMPT, MODEL_NAME, format_prompt
+    from src.rl.custom.generate import MODEL_NAME, build_system_prompt, format_prompt
     from transformers import AutoTokenizer
 
     if system_prompt is None:
-        system_prompt = DEFAULT_SYSTEM_PROMPT
+        system_prompt = build_system_prompt(target_phrase)
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
     episode = Episode(target_phrase=target_phrase)

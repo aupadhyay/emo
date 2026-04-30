@@ -19,6 +19,7 @@ from src.rl.custom.generate import (
     DEFAULT_SYSTEM_PROMPT,
     MODEL_NAME,
     build_emoji_mask,
+    build_system_prompt,
     format_prompt,
 )
 from src.rl.custom.reward import (
@@ -132,7 +133,7 @@ def _build_multiturn_prompt_local(
         messages.append(
             {
                 "role": "user",
-                "content": f'The player guessed: "{turn.guess}". That\'s wrong. Send more emoji to help them guess correctly.',
+                "content": f'The player guessed: "{turn.guess}". That\'s wrong. The correct phrase is still: "{phrase}". Send more emoji to help them.',
             }
         )
     return tokenizer.apply_chat_template(
@@ -164,7 +165,7 @@ def build_multiturn_sequence(
             messages.append(
                 {
                     "role": "user",
-                    "content": f'The player guessed: "{turn.guess}". That\'s wrong. Send more emoji to help them guess correctly.',
+                    "content": f'The player guessed: "{turn.guess}". That\'s wrong. The correct phrase is still: "{episode.target_phrase}". Send more emoji to help them.',
                 }
             )
 
@@ -285,14 +286,18 @@ def train_step(
 
     Returns dict of metrics: loss, pg_loss, kl_loss, mean_kl, grad_norm.
     """
-    if system_prompt is None:
-        system_prompt = DEFAULT_SYSTEM_PROMPT
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     pad_id = tokenizer.pad_token_id
 
+    # Use phrase-anchored system prompt per episode so the training sequence
+    # exactly matches the rollout prompt (same sys -> same tokenization).
     sequences = [
-        build_multiturn_sequence(ep, tokenizer, system_prompt) for ep in episodes
+        build_multiturn_sequence(
+            ep,
+            tokenizer,
+            system_prompt if system_prompt is not None else build_system_prompt(ep.target_phrase),
+        )
+        for ep in episodes
     ]
     max_len = max(len(s[0]) for s in sequences)
     B = len(episodes)
@@ -364,7 +369,7 @@ def generate_rollouts(
     run_episode_hf instead.
     """
     if system_prompt is None:
-        system_prompt = DEFAULT_SYSTEM_PROMPT
+        system_prompt = build_system_prompt(phrase)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     prompt = format_prompt(phrase, tokenizer, system_prompt)
@@ -448,7 +453,7 @@ def run_episode_hf(
     used in build_multiturn_sequence so rollout context == training context.
     """
     if system_prompt is None:
-        system_prompt = DEFAULT_SYSTEM_PROMPT
+        system_prompt = build_system_prompt(phrase)
 
     episode = Episode(target_phrase=phrase)
     history: list[Turn] = []
@@ -547,7 +552,7 @@ def run_episode_group_hf(
     over run_episode_hf — same outputs, ~4-6x faster on API-bound workloads.
     """
     if system_prompt is None:
-        system_prompt = DEFAULT_SYSTEM_PROMPT
+        system_prompt = build_system_prompt(phrase)
 
     episodes = [Episode(target_phrase=phrase) for _ in range(group_size)]
     active = list(range(group_size))
@@ -641,11 +646,13 @@ def train(
         phrases = ["birthday party"]
     phrase_counts: dict[str, int] = {p: 0 for p in phrases}
 
+    run_name = f"grpo_{datetime.now().strftime('%Y%m%d_%H%M')}"
+
     use_wandb = wandb is not None and bool(os.environ.get("WANDB_API_KEY"))
     if use_wandb:
         wandb.init(
             project="emo",
-            name=f"grpo_{datetime.now().strftime('%Y%m%d_%H%M')}",
+            name=run_name,
             config={
                 "model_name": model_name,
                 "n_steps": n_steps,
@@ -659,6 +666,7 @@ def train(
                 "phrases": phrases,
             },
         )
+        print(f"W&B run: {wandb.run.name} ({wandb.run.url})")
 
     logger.info("Loading models...")
     policy_model, ref_model, tokenizer = setup_models(
@@ -908,6 +916,7 @@ def train(
                         ep.target_phrase,
                         [t.guess for t in ep.turns],
                         scorer,
+                        emoji_outputs=[t.emoji_output for t in ep.turns],
                     )["trajectory_reward"]
                     for ep in eval_episodes
                 ]
@@ -1008,6 +1017,7 @@ def train(
                         ep.target_phrase,
                         [t.guess for t in ep.turns],
                         scorer,
+                        emoji_outputs=[t.emoji_output for t in ep.turns],
                     )["trajectory_reward"]
                     for ep in held_out_episodes
                 ]
@@ -1031,8 +1041,8 @@ def train(
                         "step": step,
                     })
 
-            # Mid-run checkpoint
-            ckpt_path = Path(save_dir) / f"step_{step}"
+            # Mid-run checkpoint, namespaced by run so concurrent/serial runs don't clobber.
+            ckpt_path = Path(save_dir) / run_name / f"step_{step}"
             ckpt_path.mkdir(parents=True, exist_ok=True)
             policy_model.save_pretrained(str(ckpt_path))
             tokenizer.save_pretrained(str(ckpt_path))
@@ -1119,8 +1129,8 @@ def train(
             f"completion: {completion_rate:.2f} ==="
         )
 
-    # --- Save LoRA checkpoint ---
-    save_path = Path(save_dir)
+    # --- Save final LoRA checkpoint, namespaced by run ---
+    save_path = Path(save_dir) / run_name / "final"
     save_path.mkdir(parents=True, exist_ok=True)
     policy_model.save_pretrained(str(save_path))
     tokenizer.save_pretrained(str(save_path))
