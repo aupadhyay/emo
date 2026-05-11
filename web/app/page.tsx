@@ -150,7 +150,7 @@ export default function Home() {
     <div className="game-wrap">
       <header className="game-header">
         <span className="game-title">emo</span>
-        <span className="game-meta">// emoji charades · qwen3.5-4b</span>
+        <span className="game-meta">{"// emoji charades · qwen2.5-3b"}</span>
         <div className="header-links">
           <a
             href="https://en.wikipedia.org/wiki/Pantheon_(TV_series)"
