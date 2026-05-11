@@ -295,7 +295,11 @@ def train_step(
         build_multiturn_sequence(
             ep,
             tokenizer,
-            system_prompt if system_prompt is not None else build_system_prompt(ep.target_phrase),
+            (
+                system_prompt
+                if system_prompt is not None
+                else build_system_prompt(ep.target_phrase)
+            ),
         )
         for ep in episodes
     ]
@@ -564,8 +568,14 @@ def run_episode_group_hf(
         # Batch GPU inference
         if turn_num == 1:
             emoji_outputs = generate_rollouts(
-                policy_model, tokenizer, emoji_mask, phrase,
-                len(active), temperature, max_response_tokens, system_prompt,
+                policy_model,
+                tokenizer,
+                emoji_mask,
+                phrase,
+                len(active),
+                temperature,
+                max_response_tokens,
+                system_prompt,
             )
         else:
             prompts = [
@@ -575,7 +585,12 @@ def run_episode_group_hf(
                 for i in active
             ]
             emoji_outputs = _generate_batch_hf(
-                policy_model, tokenizer, emoji_mask, prompts, temperature, max_response_tokens
+                policy_model,
+                tokenizer,
+                emoji_mask,
+                prompts,
+                temperature,
+                max_response_tokens,
             )
 
         # Concurrent API calls
@@ -583,7 +598,8 @@ def run_episode_group_hf(
             {
                 "emoji": emoji_outputs[idx],
                 "previous_guesses": [t.guess for t in episodes[i].turns] or None,
-                "turn_history": [(t.emoji_output, t.guess) for t in episodes[i].turns] or None,
+                "turn_history": [(t.emoji_output, t.guess) for t in episodes[i].turns]
+                or None,
             }
             for idx, i in enumerate(active)
         ]
@@ -666,7 +682,8 @@ def train(
                 "phrases": phrases,
             },
         )
-        print(f"W&B run: {wandb.run.name} ({wandb.run.url})")
+        if wandb.run:
+            print(f"W&B run: {wandb.run.name} ({wandb.run.url})")
 
     logger.info("Loading models...")
     policy_model, ref_model, tokenizer = setup_models(
@@ -739,14 +756,22 @@ def train(
     else:
         logger.info("Running multi-turn baseline episodes...")
         sampled_phrases = (
-            phrases if len(phrases) <= n_eval_episodes
+            phrases
+            if len(phrases) <= n_eval_episodes
             else rng.sample(phrases, n_eval_episodes)
         )
         eps_per_phrase = max(1, n_eval_episodes // len(sampled_phrases))
         for p in sampled_phrases:
             eps = run_episode_group_hf(
-                policy_model, tokenizer, emoji_mask, guesser, scorer,
-                p, eps_per_phrase, max_turns, temperature,
+                policy_model,
+                tokenizer,
+                emoji_mask,
+                guesser,
+                scorer,
+                p,
+                eps_per_phrase,
+                max_turns,
+                temperature,
             )
             history["before_episodes"].extend(eps)
 
@@ -802,8 +827,15 @@ def train(
             ]
         else:
             episodes = run_episode_group_hf(
-                policy_model, tokenizer, emoji_mask, guesser, scorer,
-                phrase, group_size, max_turns, temperature,
+                policy_model,
+                tokenizer,
+                emoji_mask,
+                guesser,
+                scorer,
+                phrase,
+                group_size,
+                max_turns,
+                temperature,
             )
 
             trajectory_rewards = [
@@ -901,15 +933,25 @@ def train(
             else:
                 eval_episodes = []
                 sampled_eval_phrases = (
-                    phrases if len(phrases) <= n_eval_episodes
+                    phrases
+                    if len(phrases) <= n_eval_episodes
                     else rng.sample(phrases, n_eval_episodes)
                 )
                 eval_eps_per_phrase = max(1, group_size // len(sampled_eval_phrases))
                 for p in sampled_eval_phrases:
-                    eval_episodes.extend(run_episode_group_hf(
-                        policy_model, tokenizer, emoji_mask, guesser, scorer,
-                        p, eval_eps_per_phrase, max_turns, temperature,
-                    ))
+                    eval_episodes.extend(
+                        run_episode_group_hf(
+                            policy_model,
+                            tokenizer,
+                            emoji_mask,
+                            guesser,
+                            scorer,
+                            p,
+                            eval_eps_per_phrase,
+                            max_turns,
+                            temperature,
+                        )
+                    )
 
                 eval_rewards_list = [
                     compute_turn_rewards(
@@ -1007,10 +1049,19 @@ def train(
                 held_out_episodes = []
                 held_out_eps_per_phrase = max(1, group_size // len(eval_phrases))
                 for p in eval_phrases:
-                    held_out_episodes.extend(run_episode_group_hf(
-                        policy_model, tokenizer, emoji_mask, guesser, scorer,
-                        p, held_out_eps_per_phrase, max_turns, temperature,
-                    ))
+                    held_out_episodes.extend(
+                        run_episode_group_hf(
+                            policy_model,
+                            tokenizer,
+                            emoji_mask,
+                            guesser,
+                            scorer,
+                            p,
+                            held_out_eps_per_phrase,
+                            max_turns,
+                            temperature,
+                        )
+                    )
 
                 held_out_rewards_list = [
                     compute_turn_rewards(
@@ -1021,10 +1072,12 @@ def train(
                     )["trajectory_reward"]
                     for ep in held_out_episodes
                 ]
-                _held_out_reward = sum(held_out_rewards_list) / len(held_out_rewards_list)
-                held_out_completion = sum(ep.completed for ep in held_out_episodes) / len(
-                    held_out_episodes
+                _held_out_reward = sum(held_out_rewards_list) / len(
+                    held_out_rewards_list
                 )
+                held_out_completion = sum(
+                    ep.completed for ep in held_out_episodes
+                ) / len(held_out_episodes)
 
                 history["held_out_eval_rewards"].append((step, _held_out_reward))
                 history["held_out_completion_rates"].append((step, held_out_completion))
@@ -1035,11 +1088,13 @@ def train(
                 )
 
                 if use_wandb:
-                    wandb.log({
-                        "eval/held_out_reward": _held_out_reward,
-                        "eval/held_out_completion_rate": held_out_completion,
-                        "step": step,
-                    })
+                    wandb.log(
+                        {
+                            "eval/held_out_reward": _held_out_reward,
+                            "eval/held_out_completion_rate": held_out_completion,
+                            "step": step,
+                        }
+                    )
 
             # Mid-run checkpoint, namespaced by run so concurrent/serial runs don't clobber.
             ckpt_path = Path(save_dir) / run_name / f"step_{step}"
@@ -1073,7 +1128,9 @@ def train(
             _recent_kl_window = history["mean_kl"][-5:]
             _recent_kl = sum(_recent_kl_window) / max(1, len(_recent_kl_window))
             if _recent_kl > 0.5:
-                print(f"\nEarly stopping: KL divergence too high (recent_kl={_recent_kl:.4f})")
+                print(
+                    f"\nEarly stopping: KL divergence too high (recent_kl={_recent_kl:.4f})"
+                )
                 _should_stop = True
 
             policy_model.train()
@@ -1106,10 +1163,19 @@ def train(
         # 30-transcript requirements from the Phase 3 spec.
         eps_per_phrase = max(1, n_eval_episodes // len(phrases))
         for p in phrases:
-            history["after_episodes"].extend(run_episode_group_hf(
-                policy_model, tokenizer, emoji_mask, guesser, scorer,
-                p, eps_per_phrase, max_turns, temperature,
-            ))
+            history["after_episodes"].extend(
+                run_episode_group_hf(
+                    policy_model,
+                    tokenizer,
+                    emoji_mask,
+                    guesser,
+                    scorer,
+                    p,
+                    eps_per_phrase,
+                    max_turns,
+                    temperature,
+                )
+            )
 
         after_rewards = [
             compute_turn_rewards(
