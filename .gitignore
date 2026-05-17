@@ -19,6 +19,12 @@ uv.lock
 # Visualization outputs
 viz_outputs/
 
+# Sweep outputs
+scripts/sweep_results.md
+scripts/sweep_all_results.md
+scripts/sweep_all_results.jsonl
+scripts/sweep_findings.md
+
 # Eval reports
 eval_outputs/
 
@@ -27,3 +33,6 @@ eval_outputs/
 
 # Personal notes
 /notes
+
+# Phrase schedule — lives in a separate private repo
+/phrases.md
