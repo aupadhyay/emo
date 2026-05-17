@@ -17,7 +17,7 @@ interface RoundResult {
   won: boolean;
 }
 
-async function apiStartGame(): Promise<{ token: string; emoji: string; tier: string }> {
+async function apiStartGame(): Promise<{ token: string; emoji: string }> {
   const res = await fetch("/api/game/start", { method: "POST" });
   if (!res.ok) throw new Error("Failed to start game");
   return res.json();
@@ -28,7 +28,7 @@ async function apiGuess(
   guess: string
 ): Promise<
   | { verdict: Verdict; done: false; nextEmoji: string; token: string; turn: number }
-  | { verdict: Verdict; done: true; phrase: string; score: number; tier: string }
+  | { verdict: Verdict; done: true; phrase: string; score: number }
 > {
   const res = await fetch("/api/game/guess", {
     method: "POST",

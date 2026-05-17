@@ -39,7 +39,7 @@ body {
   background: var(--bg);
   color: var(--fg);
   font-family: var(--font-mono);
-  font-size: 14px;
+  font-size: 18px;
   line-height: 1.7;
   -webkit-font-smoothing: antialiased;
   transition: background 0.15s, color 0.15s;
@@ -76,14 +76,14 @@ body::after {
 }
 
 .game-title {
-  font-size: 15px;
+  font-size: 19px;
   font-weight: 500;
   color: var(--fg);
   letter-spacing: 0.05em;
 }
 
 .game-meta {
-  font-size: 12px;
+  font-size: 15px;
   color: var(--fg-dim);
   flex: 1;
 }
@@ -96,7 +96,7 @@ body::after {
 }
 
 .header-link {
-  font-size: 12px;
+  font-size: 15px;
   color: var(--fg-dim);
   text-decoration: none;
 }
@@ -110,7 +110,7 @@ body::after {
   border: none;
   color: var(--fg-dim);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 15px;
   cursor: pointer;
   padding: 0;
 }
@@ -147,12 +147,12 @@ body::after {
 
 .idle-line {
   color: var(--fg-dim);
-  font-size: 13px;
+  font-size: 17px;
 }
 
 .idle-line.title {
   color: var(--fg);
-  font-size: 14px;
+  font-size: 18px;
   margin-bottom: 8px;
 }
 
@@ -162,7 +162,7 @@ body::after {
   border: none;
   color: var(--fg);
   font-family: var(--font-mono);
-  font-size: 14px;
+  font-size: 18px;
   cursor: pointer;
   padding: 0;
   text-align: left;
@@ -193,7 +193,7 @@ body::after {
 }
 
 .label {
-  font-size: 13px;
+  font-size: 17px;
   font-weight: 500;
   white-space: nowrap;
 }
@@ -212,7 +212,7 @@ body::after {
 }
 
 .emoji-out {
-  font-size: 22px;
+  font-size: 36px;
   line-height: 1;
   letter-spacing: 2px;
 }
@@ -222,7 +222,7 @@ body::after {
 }
 
 .verdict {
-  font-size: 12px;
+  font-size: 15px;
   margin-left: 8px;
 }
 
@@ -231,7 +231,7 @@ body::after {
 .verdict-wrong    { color: var(--wrong); }
 
 .sys-text {
-  font-size: 13px;
+  font-size: 17px;
   color: var(--fg-dim);
 }
 
@@ -253,7 +253,7 @@ body::after {
   border: none;
   color: var(--fg-dim);
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: 17px;
   cursor: pointer;
   padding: 0;
   text-align: left;
@@ -275,7 +275,7 @@ body::after {
 .input-prompt {
   color: var(--fg-dim);
   user-select: none;
-  font-size: 14px;
+  font-size: 18px;
 }
 
 .input-field {
@@ -285,7 +285,7 @@ body::after {
   outline: none;
   color: var(--fg);
   font-family: var(--font-mono);
-  font-size: 14px;
+  font-size: 18px;
   caret-color: var(--fg);
 }
 
@@ -296,7 +296,7 @@ body::after {
 /* mobile */
 @media (max-width: 640px) {
   html, body {
-    font-size: 13px;
+    font-size: 16px;
   }
 
   .game-wrap {
@@ -322,23 +322,23 @@ body::after {
 
   .header-link,
   .theme-btn {
-    font-size: 11px;
+    font-size: 14px;
   }
 
   .emoji-out {
-    font-size: 20px;
+    font-size: 28px;
   }
 
   .idle-line {
-    font-size: 12px;
+    font-size: 15px;
   }
 
   .idle-line.title {
-    font-size: 13px;
+    font-size: 16px;
   }
 
   .play-btn {
-    font-size: 13px;
+    font-size: 16px;
     padding: 4px 0;
   }
 

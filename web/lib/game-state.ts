@@ -1,6 +1,5 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "crypto";
 
-export type Tier = "easy" | "medium" | "hard" | "expert";
 export type Verdict = "correct" | "partial" | "wrong";
 
 export interface Turn {
@@ -11,7 +10,6 @@ export interface Turn {
 
 export interface GameState {
   phrase: string;
-  tier: Tier;
   turns: Turn[]; // emoji pre-filled per turn; guess/verdict filled as player guesses
 }
 
