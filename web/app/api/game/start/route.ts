@@ -2,9 +2,12 @@ import { encryptState } from "@/lib/game-state";
 import { generateEmoji } from "@/lib/emoji-gen";
 import { getDailyPhrase } from "@/lib/phrase-gen";
 
-export async function POST() {
+export async function POST(request: Request) {
   try {
-    const phrase = await getDailyPhrase();
+    const body = await request.json().catch(() => ({}));
+    const offset = typeof body.offset === "number" ? Math.max(0, Math.floor(body.offset)) : 0;
+
+    const phrase = await getDailyPhrase(offset);
     const emoji = await generateEmoji(phrase, []);
 
     const token = encryptState({

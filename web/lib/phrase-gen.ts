@@ -49,20 +49,21 @@ async function fetchSchedule(): Promise<Map<string, string>> {
 }
 
 /**
- * Returns today's phrase from the private schedule.
+ * Returns the phrase for a given day offset from today.
  *
- * If today's date isn't explicitly scheduled, falls back to cycling through
- * all listed phrases by day index so there's always a valid phrase.
+ * offset=0 → today, offset=1 → yesterday, offset=2 → two days ago, etc.
+ * Falls back to cycling through all listed phrases when the date isn't scheduled.
  */
-export async function getDailyPhrase(): Promise<string> {
+export async function getDailyPhrase(offset = 0): Promise<string> {
   const schedule = await fetchSchedule();
 
-  const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD UTC
-  if (schedule.has(today)) return schedule.get(today)!;
+  const targetMs = Date.now() - offset * 86_400_000;
+  const dateStr = new Date(targetMs).toISOString().slice(0, 10); // YYYY-MM-DD UTC
+  if (schedule.has(dateStr)) return schedule.get(dateStr)!;
 
   // Fallback: deterministic cycle through all scheduled phrases.
   const all = [...schedule.values()];
   if (all.length === 0) throw new Error("Phrase schedule is empty");
-  const dayIndex = Math.floor(Date.now() / 86_400_000);
+  const dayIndex = Math.floor(targetMs / 86_400_000);
   return all[dayIndex % all.length];
 }

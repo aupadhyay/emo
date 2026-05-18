@@ -11,14 +11,21 @@ type Message =
 
 type Phase = "idle" | "playing" | "result";
 
-interface RoundResult {
-  phrase: string;
-  score: number;
-  won: boolean;
-}
+const LOADING_PHRASES = [
+  "loading...",
+  "waking the emoji model...",
+  "warming modal...",
+  "finding today's phrase...",
+  "asking qwen for clues...",
+  "almost there...",
+];
 
-async function apiStartGame(): Promise<{ token: string; emoji: string }> {
-  const res = await fetch("/api/game/start", { method: "POST" });
+async function apiStartGame(offset: number): Promise<{ token: string; emoji: string }> {
+  const res = await fetch("/api/game/start", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ offset }),
+  });
   if (!res.ok) throw new Error("Failed to start game");
   return res.json();
 }
@@ -45,11 +52,14 @@ export default function Home() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [token, setToken] = useState<string | null>(null);
-  const [result, setResult] = useState<RoundResult | null>(null);
   const [theme, setTheme] = useState<"dark" | "light">("dark");
+  const [roundOffset, setRoundOffset] = useState(0);
+  const [loadingPhraseIndex, setLoadingPhraseIndex] = useState(0);
 
   const inputRef = useRef<HTMLInputElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  const loadingPhrase = LOADING_PHRASES[loadingPhraseIndex % LOADING_PHRASES.length];
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme === "light" ? "light" : "");
@@ -59,15 +69,27 @@ export default function Home() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  useEffect(() => {
+    if (!loading) {
+      setLoadingPhraseIndex(0);
+      return;
+    }
+
+    const id = window.setInterval(() => {
+      setLoadingPhraseIndex((i) => i + 1);
+    }, 1800);
+
+    return () => window.clearInterval(id);
+  }, [loading]);
+
   const startGame = useCallback(async () => {
     if (loading) return;
     setLoading(true);
     setMessages([]);
-    setResult(null);
     setInput("");
 
     try {
-      const { token: tok, emoji } = await apiStartGame();
+      const { token: tok, emoji } = await apiStartGame(roundOffset);
       setToken(tok);
       setMessages([{ kind: "ai", emoji, turn: 1 }]);
       setPhase("playing");
@@ -77,7 +99,7 @@ export default function Home() {
       setLoading(false);
       setTimeout(() => inputRef.current?.focus(), 50);
     }
-  }, [loading]);
+  }, [loading, roundOffset]);
 
   // Enter to start/next round from idle or result
   useEffect(() => {
@@ -120,9 +142,9 @@ export default function Home() {
             },
           ];
         });
-        setResult({ phrase: res.phrase, score: res.score, won: res.verdict !== "wrong" });
         setToken(null);
         setPhase("result");
+        setRoundOffset((n) => n + 1);
       } else {
         // Fill in verdict, then add next AI turn
         setMessages((prev) => {
@@ -183,8 +205,8 @@ export default function Home() {
             <p className="idle-line title">guess the phrase from emoji clues.</p>
             <p className="idle-line">the ai gets up to 3 turns to communicate.</p>
             <p className="idle-line">the model gets better as you play.</p>
-            <button className="play-btn" onClick={startGame}>
-              {loading ? "loading..." : "[ press enter to play ]"}
+            <button className="play-btn" onClick={startGame} disabled={loading}>
+              {loading ? `[ ${loadingPhrase} ]` : "[ press enter to play ]"}
             </button>
           </div>
         )}
@@ -229,8 +251,8 @@ export default function Home() {
 
         {phase === "result" && (
           <div className="round-result">
-            <button className="next-btn" onClick={startGame}>
-              {loading ? "loading..." : "[ enter — next round ]"}
+            <button className="next-btn" onClick={startGame} disabled={loading}>
+              {loading ? `[ ${loadingPhrase} ]` : "[ enter — next round ]"}
             </button>
           </div>
         )}
@@ -239,7 +261,7 @@ export default function Home() {
           <div className="msg msg-ai">
             <span className="label label-ai">&lt;emo&gt;</span>
             <span className="sep"> : </span>
-            <span className="sys-text">...</span>
+            <span className="sys-text">{loadingPhrase}</span>
           </div>
         )}
 

@@ -172,6 +172,11 @@ body::after {
   color: var(--ai-label);
 }
 
+.play-btn:disabled,
+.next-btn:disabled {
+  cursor: wait;
+}
+
 /* messages */
 .msg {
   display: flex;
